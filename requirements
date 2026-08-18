@@ -1,0 +1,5 @@
+fastapi==0.141.1
+finance-datareader==0.9.202
+numpy @ file:///C:/Users/task_177618878104266/croot/numpy_and_numpy_base_1776188884726/work/dist/numpy-2.4.4-cp313-cp313-
+pandas @ file:///D:/bld/bld/rattler-build_pandas_1785276280/work
+uvicorn==0.52.3
