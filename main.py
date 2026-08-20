@@ -1,15 +1,29 @@
+# C:\AiMystock\stock_backend\main.py
+
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 import FinanceDataReader as fdr
 import pandas as pd
 import numpy as np
 import json
+import sys
+import os
 from datetime import datetime, timedelta
+
+# samsungAI 엔진 모듈 경로 추가
+samsung_ai_path = "C:/samsungAI"
+if samsung_ai_path not in sys.path:
+    sys.path.append(samsung_ai_path)
+
+try:
+    from service import analyze_stock_for_api
+except ImportError:
+    analyze_stock_for_api = None
 
 app = FastAPI(
     title="Stock AI Analytics API",
-    description="FinanceDataReader 기반 주식 분석 백엔드 API",
-    version="1.0.0"
+    description="FinanceDataReader 및 samsungAI 기반 주식 분석 백엔드 API",
+    version="1.1.0"
 )
 
 # CORS 설정
@@ -42,7 +56,7 @@ KOREA_STOCK_MAP = {
 def read_root():
     return {"status": "ok", "message": "Stock Analytics Backend is Running"}
 
-# 1. 주식 일봉 데이터 조회 API
+# 1. 주식 일봉/주봉 데이터 조회 API
 @app.get("/api/v1/stock/candles")
 def get_stock_candles(
     symbol: str = Query(..., description="종목코드 또는 티커 (예: 005930, AAPL, 삼성전자)"),
@@ -97,6 +111,37 @@ def get_stock_candles(
         records = json.loads(result_df.to_json(orient='records'))
         return records
 
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Error fetching data for {symbol}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"데이터 조회 실패: {str(e)}")
+
+# 2. samsungAI 멀티 타임프레임 & CLV 분석 연동 API
+@app.get("/api/v1/stock/analyze")
+def analyze_stock_mtf(
+    symbol: str = Query(..., description="종목코드, 티커 또는 한글 종목명 (예: 005930, AAPL, 삼성전자)")
+):
+    if analyze_stock_for_api is None:
+        raise HTTPException(status_code=500, detail="samsungAI 분석 엔진 모듈을 로드할 수 없습니다.")
+        
+    try:
+        raw_symbol = symbol.strip()
+        
+        # 한글 종목명 변환 및 접미사 정제
+        target_symbol = KOREA_STOCK_MAP.get(raw_symbol, raw_symbol)
+        target_symbol = target_symbol.upper().replace(".KS", "").replace(".KQ", "")
+
+        # AI 분석 실행
+        result = analyze_stock_for_api(target_symbol)
+        
+        if "error" in result:
+            raise HTTPException(status_code=400, detail=result["error"])
+            
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error analyzing stock {symbol}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"AI 분석 실패: {str(e)}")
