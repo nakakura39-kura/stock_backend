@@ -10,10 +10,16 @@ import sys
 import os
 from datetime import datetime, timedelta
 
-# samsungAI 엔진 모듈 경로 추가
-samsung_ai_path = "C:/samsungAI"
+# 백엔드 프로젝트 내 samsungAI 경로 자동 탐색 (로컬 및 클라우드 공용)
+current_dir = os.path.dirname(os.path.abspath(__file__))
+samsung_ai_path = os.path.join(current_dir, "samsungAI")
+
 if samsung_ai_path not in sys.path:
     sys.path.append(samsung_ai_path)
+
+# 예비 경로 (C:\samsungAI 직접 참조 대응)
+if "C:/samsungAI" not in sys.path and os.path.exists("C:/samsungAI"):
+    sys.path.append("C:/samsungAI")
 
 try:
     from service import analyze_stock_for_api
@@ -64,24 +70,16 @@ def get_stock_candles(
     days: int = Query(365, description="조회 기간 (일수 단위)")
 ):
     try:
-        # 입력값 정제
         raw_symbol = symbol.strip()
-        
-        # 1) 한글 종목명이 검색어로 들어온 경우 변환
         target_symbol = KOREA_STOCK_MAP.get(raw_symbol, raw_symbol)
-        
-        # 2) '.KS' 나 '.KQ' 가 붙어있으면 제거 (fdr은 6자리 숫자만 지원)
         target_symbol = target_symbol.upper().replace(".KS", "").replace(".KQ", "")
 
         start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-        
-        # fdr 데이터 불러오기
         df = fdr.DataReader(target_symbol, start=start_date)
         
         if df is None or df.empty:
             raise HTTPException(status_code=404, detail="해당 종목의 데이터를 찾을 수 없습니다.")
         
-        # 주봉 변환 필요한 경우
         if timeframe.upper() == 'W':
             df = df.resample('W').agg({
                 'Open': 'first',
@@ -91,22 +89,15 @@ def get_stock_candles(
                 'Volume': 'sum'
             }).dropna()
 
-        # 인덱스(날짜) 정리 및 컬럼 소문자 변환
         df = df.reset_index()
-        
-        # 컬럼명 표준화
         df.columns = [c.lower() for c in df.columns]
         
-        # date 컬럼 찾기 (date 또는 index)
         if 'date' in df.columns:
             df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
         elif 'index' in df.columns:
             df['date'] = pd.to_datetime(df['index']).dt.strftime('%Y-%m-%d')
 
-        # 필요한 컬럼만 선택
         result_df = df[['date', 'open', 'high', 'low', 'close', 'volume']].copy()
-        
-        # NaN / null 값 처리 후 JSON 변환
         result_df = result_df.fillna(0)
         records = json.loads(result_df.to_json(orient='records'))
         return records
@@ -127,12 +118,9 @@ def analyze_stock_mtf(
         
     try:
         raw_symbol = symbol.strip()
-        
-        # 한글 종목명 변환 및 접미사 정제
         target_symbol = KOREA_STOCK_MAP.get(raw_symbol, raw_symbol)
         target_symbol = target_symbol.upper().replace(".KS", "").replace(".KQ", "")
 
-        # AI 분석 실행
         result = analyze_stock_for_api(target_symbol)
         
         if "error" in result:
