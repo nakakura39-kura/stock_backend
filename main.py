@@ -1,5 +1,3 @@
-# C:\AiMystock\stock_backend\main.py
-
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 import FinanceDataReader as fdr
@@ -8,23 +6,25 @@ import numpy as np
 import json
 import sys
 import os
+import traceback
 from datetime import datetime, timedelta
 
-# 백엔드 프로젝트 내 samsungAI 경로 자동 탐색 (로컬 및 클라우드 공용)
+# 백엔드 프로젝트 내 samsungAI 경로 자동 탐색
 current_dir = os.path.dirname(os.path.abspath(__file__))
 samsung_ai_path = os.path.join(current_dir, "samsungAI")
 
 if samsung_ai_path not in sys.path:
     sys.path.append(samsung_ai_path)
 
-# 예비 경로 (C:\samsungAI 직접 참조 대응)
 if "C:/samsungAI" not in sys.path and os.path.exists("C:/samsungAI"):
     sys.path.append("C:/samsungAI")
 
+analyze_import_error = None
 try:
     from service import analyze_stock_for_api
-except ImportError:
+except Exception as e:
     analyze_stock_for_api = None
+    analyze_import_error = str(e)
 
 app = FastAPI(
     title="Stock AI Analytics API",
@@ -32,7 +32,6 @@ app = FastAPI(
     version="1.1.0"
 )
 
-# CORS 설정
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -41,7 +40,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 주요 한글 종목명 -> 티커 변환 맵
 KOREA_STOCK_MAP = {
     "삼성전자": "005930",
     "SK하이닉스": "000660",
@@ -62,12 +60,11 @@ KOREA_STOCK_MAP = {
 def read_root():
     return {"status": "ok", "message": "Stock Analytics Backend is Running"}
 
-# 1. 주식 일봉/주봉 데이터 조회 API
 @app.get("/api/v1/stock/candles")
 def get_stock_candles(
-    symbol: str = Query(..., description="종목코드 또는 티커 (예: 005930, AAPL, 삼성전자)"),
+    symbol: str = Query(..., description="종목코드 또는 티커"),
     timeframe: str = Query("D", description="주기: 'D'(일봉) 또는 'W'(주봉)"),
-    days: int = Query(365, description="조회 기간 (일수 단위)")
+    days: int = Query(365, description="조회 기간")
 ):
     try:
         raw_symbol = symbol.strip()
@@ -105,16 +102,17 @@ def get_stock_candles(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error fetching data for {symbol}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"데이터 조회 실패: {str(e)}")
 
-# 2. samsungAI 멀티 타임프레임 & CLV 분석 연동 API
 @app.get("/api/v1/stock/analyze")
 def analyze_stock_mtf(
-    symbol: str = Query(..., description="종목코드, 티커 또는 한글 종목명 (예: 005930, AAPL, 삼성전자)")
+    symbol: str = Query(..., description="종목코드 또는 한글 종목명")
 ):
     if analyze_stock_for_api is None:
-        raise HTTPException(status_code=500, detail="samsungAI 분석 엔진 모듈을 로드할 수 없습니다.")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"samsungAI 모듈 로드 실패 (ImportError: {analyze_import_error})"
+        )
         
     try:
         raw_symbol = symbol.strip()
@@ -123,7 +121,7 @@ def analyze_stock_mtf(
 
         result = analyze_stock_for_api(target_symbol)
         
-        if "error" in result:
+        if isinstance(result, dict) and "error" in result:
             raise HTTPException(status_code=400, detail=result["error"])
             
         return result
@@ -131,5 +129,6 @@ def analyze_stock_mtf(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error analyzing stock {symbol}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"AI 분석 실패: {str(e)}")
+        err_msg = traceback.format_exc()
+        print(f"Error analyzing stock {symbol}:\n{err_msg}")
+        raise HTTPException(status_code=500, detail=f"AI 분석 내부 오류: {str(e)}")
