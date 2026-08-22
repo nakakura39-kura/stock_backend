@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>삼성전자 AI 차트 분석</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Chart.js CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        body {
+            background-color: #070b14;
+            color: #f8fafc;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            -webkit-tap-highlight-color: transparent;
+        }
+        .card-bg {
+            background: linear-gradient(180deg, #101726 0%, #0b101d 100%);
+            border: 1px solid #1e293b;
+        }
+        .neon-text-green {
+            color: #00ff87;
+            text-shadow: 0 0 10px rgba(0, 255, 135, 0.3);
+        }
+        .neon-border-blue {
+            border: 1px solid #1d4ed8;
+            box-shadow: 0 0 15px rgba(29, 78, 216, 0.2);
+        }
+        /* Custom scrollbar */
+        ::-webkit-scrollbar { width: 0px; }
+    </style>
+</head>
+<body class="flex justify-center bg-black min-h-screen">
+
+    <!-- Mobile Viewport Wrapper -->
+    <div class="w-full max-w-md bg-[#070b14] min-h-screen flex flex-col justify-between pb-20 relative shadow-2xl">
+        
+        <!-- 1. Header Area -->
+        <div class="px-5 pt-6 pb-4 flex justify-between items-center sticky top-0 bg-[#070b14]/90 backdrop-blur-md z-30 border-b border-slate-900">
+            <div class="flex items-center gap-3">
+                <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-blue-600 to-emerald-400 flex items-center justify-center shadow-lg">
+                    <i class="fa-solid fa-chart-line text-white text-lg"></i>
+                </div>
+                <div>
+                    <h1 class="text-lg font-bold tracking-tight text-white flex items-center gap-2">
+                        <span id="stock-name">삼성전자</span> AI 차트 분석
+                    </h1>
+                    <p class="text-xs text-slate-400">AI 기반 주가 흐름 분석 시스템</p>
+                </div>
+            </div>
+            <div class="flex items-center gap-2">
+                <div class="bg-slate-900 border border-slate-800 rounded-full px-3 py-1 flex items-center gap-1.5">
+                    <i class="fa-solid fa-star text-amber-400 text-xs"></i>
+                    <span class="text-xs font-semibold text-emerald-400">10000000</span>
+                </div>
+                <button class="text-slate-400 hover:text-white p-1">
+                    <i class="fa-solid fa-gear text-lg"></i>
+                </button>
+            </div>
+        </div>
+
+        <div class="px-4 space-y-4 mt-2">
+
+            <!-- 2. Main Chart Card -->
+            <div class="card-bg rounded-2xl p-4 shadow-xl relative overflow-hidden">
+                <div class="flex justify-between items-center mb-2">
+                    <div class="flex items-center gap-2">
+                        <i class="fa-solid fa-arrow-trend-up text-emerald-400"></i>
+                        <span class="font-bold text-sm text-slate-200"><span id="chart-title-name">삼성전자</span> 차트 분석</span>
+                    </div>
+                    <button onclick="fetchStockData()" class="bg-blue-600 hover:bg-blue-500 text-white text-xs px-3 py-1.5 rounded-lg font-medium flex items-center gap-1 shadow-lg shadow-blue-600/30">
+                        <i class="fa-solid fa-bolt text-amber-300"></i> 차트 분석 (실시간)
+                    </button>
+                </div>
+
+                <!-- Canvas Chart -->
+                <div class="h-48 w-full mt-2">
+                    <canvas id="stockChart"></canvas>
+                </div>
+            </div>
+
+            <!-- 3. Key Metrics & AI Verdict Card Grid -->
+            <div class="grid grid-cols-12 gap-3">
+                <!-- Current Price & Volume -->
+                <div class="col-span-7 card-bg rounded-2xl p-3.5 flex flex-col justify-between">
+                    <div class="grid grid-cols-2 gap-2">
+                        <div>
+                            <span class="text-[11px] text-slate-400 block">현재가</span>
+                            <span id="current-price" class="text-lg font-extrabold text-white">---원</span>
+                            <span id="price-change" class="text-[11px] text-emerald-400 block font-medium">▲ 0.0%</span>
+                        </div>
+                        <div>
+                            <span class="text-[11px] text-slate-400 block">거래량</span>
+                            <span id="volume" class="text-sm font-bold text-slate-200 mt-1 block">---주</span>
+                            <span class="text-[11px] text-emerald-400 block font-medium">▲ 12.4%</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- AI Verdict Card -->
+                <div class="col-span-5 bg-gradient-to-br from-emerald-950/40 to-slate-900 border border-emerald-500/30 rounded-2xl p-3 flex flex-col items-center justify-center text-center">
+                    <div class="w-8 h-8 rounded-full bg-amber-500/10 flex items-center justify-center mb-1">
+                        <i class="fa-solid fa-trophy text-amber-400 text-base"></i>
+                    </div>
+                    <span class="text-[10px] text-slate-300 font-medium">AI 종합판단</span>
+                    <span id="ai-verdict-text" class="text-sm font-extrabold neon-text-green mt-0.5">매수 관점</span>
+                    <span id="ai-verdict-sub" class="text-[9px] text-emerald-300/80 mt-0.5">(강세 흐름 지속)</span>
+                </div>
+            </div>
+
+            <!-- 4. AI Opinion & Multi-level Order Strategy Table -->
+            <div class="card-bg rounded-2xl p-4 shadow-xl border border-slate-800/80">
+                <!-- Banner Header -->
+                <div class="flex items-center gap-2 mb-3 pb-2 border-b border-slate-800">
+                    <i class="fa-solid fa-fire text-rose-500 text-base"></i>
+                    <h2 class="text-sm font-bold text-rose-400">
+                        AI 의견 : <span id="ai-opinion-title">분석 중...</span>
+                    </h2>
+                </div>
+
+                <div class="grid grid-cols-12 gap-3">
+                    <!-- Left Summary Metrics -->
+                    <div class="col-span-4 flex flex-col justify-between text-xs space-y-2 border-r border-slate-800 pr-2">
+                        <div>
+                            <span class="text-[10px] text-slate-400 block">상승 확률</span>
+                            <span id="win-rate" class="font-bold text-slate-100">75%</span> 
+                            <span class="text-amber-400 text-[10px]">★4</span>
+                        </div>
+
+                        <div class="space-y-1">
+                            <div class="flex flex-col">
+                                <span class="text-[9px] text-purple-400 font-semibold">🎯 매수 구간</span>
+                                <span id="buy-range" class="text-[10px] text-slate-300">---</span>
+                            </div>
+                            <div class="flex flex-col">
+                                <span class="text-[9px] text-cyan-400 font-semibold">🎯 매도 구간</span>
+                                <span id="sell-range" class="text-[10px] text-slate-300">---</span>
+                            </div>
+                        </div>
+
+                        <div class="text-[10px] text-slate-400 pt-1">
+                            과매도: <span id="is-oversold" class="text-slate-200">아니오</span><br>
+                            과매수: <span id="is-overbought" class="text-slate-200">아니오</span>
+                        </div>
+                    </div>
+
+                    <!-- Right Strategy Table -->
+                    <div class="col-span-8 overflow-x-auto">
+                        <table class="w-full text-left text-[10px]">
+                            <thead>
+                                <tr class="text-slate-400 border-b border-slate-800/80">
+                                    <th class="pb-1 font-normal">구분</th>
+                                    <th class="pb-1 font-normal text-center">비중</th>
+                                    <th class="pb-1 font-normal text-right">예약 단가</th>
+                                    <th class="pb-1 font-normal text-right">수량</th>
+                                </tr>
+                            </thead>
+                            <tbody id="strategy-table-body" class="divide-y divide-slate-800/40">
+                                <!-- JS Dynamic Injection -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- 5. Bottom Navigation Bar -->
+        <div class="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-md bg-[#090e1a]/95 backdrop-blur-lg border-t border-slate-800/80 px-6 py-2.5 flex justify-between items-center z-40">
+            <button class="flex flex-col items-center gap-1 text-emerald-400">
+                <i class="fa-solid fa-house text-base"></i>
+                <span class="text-[10px] font-bold">홈</span>
+            </button>
+            <button class="flex flex-col items-center gap-1 text-slate-400 hover:text-slate-200">
+                <i class="fa-solid fa-chart-simple text-base"></i>
+                <span class="text-[10px]">차트</span>
+            </button>
+            <button class="flex flex-col items-center gap-1 text-slate-400 hover:text-slate-200 relative">
+                <i class="fa-regular fa-bell text-base"></i>
+                <span class="w-2 h-2 rounded-full bg-rose-500 absolute top-0 right-1"></span>
+                <span class="text-[10px]">알림</span>
+            </button>
+            <button class="flex flex-col items-center gap-1 text-slate-400 hover:text-slate-200">
+                <i class="fa-regular fa-star text-base"></i>
+                <span class="text-[10px]">관심종목</span>
+            </button>
+            <button class="flex flex-col items-center gap-1 text-slate-400 hover:text-slate-200">
+                <i class="fa-regular fa-user text-base"></i>
+                <span class="text-[10px]">MY</span>
+            </button>
+        </div>
+
+    </div>
+
+    <!-- JavaScript Integration Script -->
+    <script>
+        let myChart = null;
+
+        // FastAPI 백엔드 API 서버 URL (로컬 또는 Render 클라우드 주소로 지정)
+        const API_BASE_URL = "http://127.0.0.1:8000"; 
+
+        async function fetchStockData(symbol = "005930") {
+            try {
+                // 1. AI 분석 API 호출
+                const response = await fetch(`${API_BASE_URL}/api/v1/stock/analyze?symbol=${symbol}`);
+                const data = await response.json();
+
+                if (data.status === "REJECTED") {
+                    updateUIForRejected(data);
+                } else {
+                    updateUIForApproved(data);
+                }
+
+                // 2. 차트 렌더링
+                renderChart();
+
+            } catch (error) {
+                console.error("API 연동 오류:", error);
+                // API 서버 실행 안 되어 있을 경우 데모용 더미 데이터 반영
+                renderDummyData();
+            }
+        }
+
+        function updateUIForApproved(data) {
+            const price = data.current_price || 289937;
+            
+            document.getElementById('current-price').innerText = `${price.toLocaleString()}원`;
+            document.getElementById('volume').innerText = `18,742,000주`;
+            
+            document.getElementById('ai-verdict-text').innerText = "매수 관점";
+            document.getElementById('ai-verdict-text').className = "text-sm font-extrabold neon-text-green mt-0.5";
+            document.getElementById('ai-verdict-sub').innerText = `(종합점수 ${data.final_score}점)`;
+
+            document.getElementById('ai-opinion-title').innerText = "매수 적정 (상승 모멘텀)";
+            document.getElementById('ai-opinion-title').className = "text-emerald-400 font-bold";
+            
+            document.getElementById('buy-range').innerText = `${data.stop_loss_price.toLocaleString()} ~ ${price.toLocaleString()}원`;
+            document.getElementById('sell-range').innerText = `${price.toLocaleString()} ~ ${data.target_price.toLocaleString()}원`;
+
+            // 분할 매매 테이블 자동 계산
+            buildStrategyTable(price);
+        }
+
+        function updateUIForRejected(data) {
+            const price = data.current_price || 70000;
+            document.getElementById('current-price').innerText = `${price.toLocaleString()}원`;
+            
+            document.getElementById('ai-verdict-text').innerText = "매수 금지";
+            document.getElementById('ai-verdict-text').className = "text-sm font-extrabold text-rose-500 mt-0.5";
+            document.getElementById('ai-verdict-sub').innerText = "(위험 요인 감지)";
+
+            document.getElementById('ai-opinion-title').innerText = `매수비추천 (${data.reasons[0] || '위험'})`;
+            document.getElementById('ai-opinion-title').className = "text-rose-500 font-bold";
+
+            buildStrategyTable(price);
+        }
+
+        function buildStrategyTable(basePrice) {
+            const tableBody = document.getElementById('strategy-table-body');
+            const rows = [
+                { type: '1차 매입매수', color: 'text-rose-400', ratio: '30%', price: Math.round(basePrice * 0.98), qty: 10 },
+                { type: '2차 매입매수', color: 'text-rose-400', ratio: '30%', price: Math.round(basePrice * 0.95), qty: 11 },
+                { type: '3차 매입매수', color: 'text-rose-400', ratio: '40%', price: Math.round(basePrice * 0.92), qty: 15 },
+                { type: '1차 매도대기', color: 'text-emerald-400', ratio: '40%', price: Math.round(basePrice * 1.04), qty: 14 },
+                { type: '2차 매도대기', color: 'text-emerald-400', ratio: '30%', price: Math.round(basePrice * 1.07), qty: 10 },
+                { type: '3차 매도대기', color: 'text-emerald-400', ratio: '30%', price: Math.round(basePrice * 1.10), qty: 12 },
+            ];
+
+            tableBody.innerHTML = rows.map((r, i) => `
+                <tr class="hover:bg-slate-800/30 transition-colors">
+                    <td class="py-1.5 font-medium ${r.color}">${i+1}. ${r.type}</td>
+                    <td class="py-1.5 text-center text-slate-300">${r.ratio}</td>
+                    <td class="py-1.5 text-right font-semibold text-slate-200">${r.price.toLocaleString()}원</td>
+                    <td class="py-1.5 text-right text-slate-400">${r.qty}주</td>
+                </tr>
+            `).join('');
+        }
+
+        function renderChart() {
+            const ctx = document.getElementById('stockChart').getContext('2d');
+            
+            // 네온 그린 그라데이션 배경
+            const gradient = ctx.createLinearGradient(0, 0, 0, 200);
+            gradient.addColorStop(0, 'rgba(0, 255, 135, 0.35)');
+            gradient.addColorStop(1, 'rgba(0, 255, 135, 0.0)');
+
+            // 더미 파동 데이터 (디자인과 동일한 우상향 곡선)
+            const chartData = [100000, 95000, 105000, 80000, 70000, 75000, 85000, 120000, 160000, 140000, 220000, 340000, 270000, 300000];
+            const labels = Array.from({length: chartData.length}, (_, i) => i * 50);
+
+            if (myChart) myChart.destroy();
+
+            myChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        data: chartData,
+                        borderColor: '#00ff87',
+                        borderWidth: 2.5,
+                        pointRadius: 0,
+                        fill: true,
+                        backgroundColor: gradient,
+                        tension: 0.35
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: {
+                            grid: { color: 'rgba(255, 255, 255, 0.05)' },
+                            ticks: { color: '#64748b', font: { size: 9 } }
+                        },
+                        y: {
+                            position: 'left',
+                            grid: { color: 'rgba(255, 255, 255, 0.05)' },
+                            ticks: { color: '#64748b', font: { size: 9 } }
+                        }
+                    }
+                }
+            });
+        }
+
+        function renderDummyData() {
+            updateUIForApproved({
+                current_price: 289937,
+                target_price: 322000,
+                stop_loss_price: 259000,
+                final_score: 69.7
+            });
+            renderChart();
+        }
+
+        // 페이지 로드 시 실행
+        window.onload = () => {
+            fetchStockData("005930");
+        };
+    </script>
+</body>
+</html>
