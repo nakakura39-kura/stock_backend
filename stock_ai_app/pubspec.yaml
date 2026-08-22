@@ -1,0 +1,38 @@
+name: stock_ai_app
+description: "AI 기반 주가 차트 분석 및 분할 매매 추천 앱"
+publish_to: 'none' # 패키지로 게시하지 않도록 설정
+
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # UI 아이콘 패키지
+  cupertino_icons: ^1.0.8
+
+  # 실시간 주가 데이터 요청 패키지 (Yahoo Finance / API 통신용)
+  http: ^1.6.0
+
+  # 라인 차트 구현 패키지
+  fl_chart: ^1.2.0
+
+  # 숫자 콤마(,) 표시 및 통화 포맷팅 패키지
+  intl: ^0.19.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  flutter_lints: ^3.0.0
+
+# 앱 에셋 및 폰트 설정 (필요 시 주석 해제)
+flutter:
+  uses-material-design: true
+
+  # 에셋(이미지 등)을 사용할 경우 아래 주석을 풀어 사용합니다.
+  # assets:
+  #   - assets/
