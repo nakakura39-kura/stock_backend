@@ -1,5 +1,10 @@
 fastapi
+uvicorn
 finance-datareader
 numpy
 pandas
-uvicorn
+yfinance
+torch
+scikit-learn
+joblib
+requests
