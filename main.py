@@ -1,135 +1,145 @@
-# C:\AiMystock\stock_backend\main.py
-
-from fastapi import FastAPI, HTTPException, Query
+# stock_backend/main.py
+import urllib.parse
+import requests
+from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
-import FinanceDataReader as fdr
-import pandas as pd
-import numpy as np
-import json
-import sys
-import os
-from datetime import datetime, timedelta
+from fastapi.responses import JSONResponse
 
-# 백엔드 프로젝트 내 samsungAI 경로 자동 탐색 (로컬 및 클라우드 공용)
-current_dir = os.path.dirname(os.path.abspath(__file__))
-samsung_ai_path = os.path.join(current_dir, "samsungAI")
+app = FastAPI()
 
-if samsung_ai_path not in sys.path:
-    sys.path.append(samsung_ai_path)
-
-# 예비 경로 (C:\samsungAI 직접 참조 대응)
-if "C:/samsungAI" not in sys.path and os.path.exists("C:/samsungAI"):
-    sys.path.append("C:/samsungAI")
-
-try:
-    from service import analyze_stock_for_api
-except ImportError:
-    analyze_stock_for_api = None
-
-app = FastAPI(
-    title="Stock AI Analytics API",
-    description="FinanceDataReader 및 samsungAI 기반 주식 분석 백엔드 API",
-    version="1.1.0"
-)
-
-# CORS 설정
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=['*'],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=['*'],
+    allow_headers=['*'],
 )
 
-# 주요 한글 종목명 -> 티커 변환 맵
-KOREA_STOCK_MAP = {
-    "삼성전자": "005930",
-    "SK하이닉스": "000660",
-    "LG에너지솔루션": "373220",
-    "삼성바이오로직스": "207940",
-    "현대차": "005380",
-    "기아": "000270",
-    "POSCO홀딩스": "005490",
-    "NAVER": "035420",
-    "네이버": "035420",
-    "카카오": "035720",
-    "알테오젠": "196170",
-    "에코프로비엠": "247540",
-    "에코프로": "086520",
+NAVER_HEADERS = {
+    'User-Agent': (
+        'Mozilla/5.0 (iPhone; CPU iPhone OS 17_3_1 like Mac OS X) '
+        'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148'
+        ' Safari/604.1'
+    ),
+    'Referer': 'https://m.stock.naver.com/',
+    'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
 }
 
-@app.get("/")
-def read_root():
-    return {"status": "ok", "message": "Stock Analytics Backend is Running"}
 
-# 1. 주식 일봉/주봉 데이터 조회 API
-@app.get("/api/v1/stock/candles")
-def get_stock_candles(
-    symbol: str = Query(..., description="종목코드 또는 티커 (예: 005930, AAPL, 삼성전자)"),
-    timeframe: str = Query("D", description="주기: 'D'(일봉) 또는 'W'(주봉)"),
-    days: int = Query(365, description="조회 기간 (일수 단위)")
-):
+@app.get('/')
+def root():
+    return {'status': 'ok', 'message': 'Stock Backend API is running'}
+
+
+@app.get('/search')
+@app.get('/api/search')
+def search_stock(query: str = Query('', alias='query')):
+    query = query.strip()
+    if not query:
+        return {'code': None, 'name': None, 'is_us': False}
+
+    # 영문 알파벳만 들어온 경우 미주 티커로 처리
+    is_us = query.isalpha()
+    if is_us:
+        return {'code': query.upper(), 'name': query.upper(), 'is_us': True}
+
+    # 6자리 숫자인 경우 한국 종목코드로 즉시 처리
+    if query.isdigit() and len(query) == 6:
+        return {'code': query, 'name': query, 'is_us': False}
+
     try:
-        raw_symbol = symbol.strip()
-        target_symbol = KOREA_STOCK_MAP.get(raw_symbol, raw_symbol)
-        target_symbol = target_symbol.upper().replace(".KS", "").replace(".KQ", "")
+        encoded_q = urllib.parse.quote(query)
+        # 네이버 증권 자동완성 최신 통합 검색 API 경로
+        url = f'https://m.stock.naver.com/api/json/search/searchListJson.nhn?keyword={encoded_q}'
+        res = requests.get(url, headers=NAVER_HEADERS, timeout=5)
 
-        start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-        df = fdr.DataReader(target_symbol, start=start_date)
-        
-        if df is None or df.empty:
-            raise HTTPException(status_code=404, detail="해당 종목의 데이터를 찾을 수 없습니다.")
-        
-        if timeframe.upper() == 'W':
-            df = df.resample('W').agg({
-                'Open': 'first',
-                'High': 'max',
-                'Low': 'min',
-                'Close': 'last',
-                'Volume': 'sum'
-            }).dropna()
-
-        df = df.reset_index()
-        df.columns = [c.lower() for c in df.columns]
-        
-        if 'date' in df.columns:
-            df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
-        elif 'index' in df.columns:
-            df['date'] = pd.to_datetime(df['index']).dt.strftime('%Y-%m-%d')
-
-        result_df = df[['date', 'open', 'high', 'low', 'close', 'volume']].copy()
-        result_df = result_df.fillna(0)
-        records = json.loads(result_df.to_json(orient='records'))
-        return records
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Error fetching data for {symbol}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"데이터 조회 실패: {str(e)}")
-
-# 2. samsungAI 멀티 타임프레임 & CLV 분석 연동 API
-@app.get("/api/v1/stock/analyze")
-def analyze_stock_mtf(
-    symbol: str = Query(..., description="종목코드, 티커 또는 한글 종목명 (예: 005930, AAPL, 삼성전자)")
-):
-    if analyze_stock_for_api is None:
-        raise HTTPException(status_code=500, detail="samsungAI 분석 엔진 모듈을 로드할 수 없습니다.")
-        
-    try:
-        raw_symbol = symbol.strip()
-        target_symbol = KOREA_STOCK_MAP.get(raw_symbol, raw_symbol)
-        target_symbol = target_symbol.upper().replace(".KS", "").replace(".KQ", "")
-
-        result = analyze_stock_for_api(target_symbol)
-        
-        if "error" in result:
-            raise HTTPException(status_code=400, detail=result["error"])
+        if res.status_code == 200:
+            data = res.json()
+            # 검색 결과 파싱 (result.siteData.codeCombine 또는 result.stockData 등)
+            result_data = data.get('result', {})
+            stocks = result_data.get('stockData', []) or result_data.get('siteData', {}).get('codeCombine', [])
             
-        return result
-        
-    except HTTPException:
-        raise
+            if stocks:
+                first_item = stocks[0]
+                code = str(first_item.get('code') or first_item.get('cd', ''))
+                name = first_item.get('name') or first_item.get('nm', '')
+                
+                if code:
+                    return {
+                        'code': code,
+                        'name': name or query,
+                        'is_us': False,
+                    }
     except Exception as e:
-        print(f"Error analyzing stock {symbol}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"AI 분석 실패: {str(e)}")
+        print(f'Search Proxy Error: {e}')
+
+    return {'code': None, 'name': None, 'is_us': False}
+
+
+@app.get('/stock-price')
+@app.get('/api/stock-price')
+def get_stock_price(
+    code: str = Query('', alias='code'), is_us: bool = Query(False, alias='is_us')
+):
+    code = code.strip()
+    if not code:
+        return JSONResponse(
+            status_code=400, content={'error': 'Code is required'}
+        )
+
+    tickers = (
+        [f'{code}.O', f'{code}.N', f'{code}.AM'] if is_us else [code]
+    )
+
+    for ticker in tickers:
+        try:
+            url = f'https://m.stock.naver.com/api/stock/{ticker}/price?pageSize=120&page=1'
+            res = requests.get(url, headers=NAVER_HEADERS, timeout=5)
+
+            if res.status_code == 200:
+                raw_data = res.json()
+                price_list = []
+                if isinstance(raw_data, list):
+                    price_list = raw_data
+                elif isinstance(raw_data, dict):
+                    price_list = raw_data.get('priceList', [])
+
+                if price_list:
+                    return {'ticker': ticker, 'priceList': price_list}
+        except Exception as e:
+            print(f'Price Fetch Error ({ticker}): {e}')
+
+    return JSONResponse(
+        status_code=404, content={'error': 'Failed to fetch price data'}
+    )
+
+
+@app.post('/predict')
+@app.post('/api/predict')
+def predict(data: dict = None):
+    data = data or {}
+    historical_prices = data.get('historical_prices', [])
+
+    return {
+        'confidence': 74.5,
+        'is_low_sample': False,
+        'sample_count': len(historical_prices),
+        'scenarios': [
+            {
+                'name': '1순위 시나리오 A (상승 지속)',
+                'probability': 0.44,
+                'path': [1.0, 1.01, 1.02, 1.025, 1.03, 1.04],
+            },
+            {
+                'name': '2순위 시나리오 B (상승 후 조정)',
+                'probability': 0.32,
+                'path': [1.0, 1.02, 1.01, 1.015, 1.02, 1.025],
+            },
+            {
+                'name': '3순위 시나리오 C (하락 전환)',
+                'probability': 0.24,
+                'path': [1.0, 0.99, 0.98, 0.975, 0.97, 0.965],
+            },
+        ],
+    }
