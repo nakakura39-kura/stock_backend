@@ -17,9 +17,8 @@ app.add_middleware(
 
 NAVER_HEADERS = {
     'User-Agent': (
-        'Mozilla/5.0 (iPhone; CPU iPhone OS 17_3_1 like Mac OS X) '
-        'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148'
-        ' Safari/604.1'
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+        'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
     ),
     'Referer': 'https://m.stock.naver.com/',
     'Accept': 'application/json, text/plain, */*',
@@ -50,13 +49,11 @@ def search_stock(query: str = Query('', alias='query')):
 
     try:
         encoded_q = urllib.parse.quote(query)
-        # 네이버 증권 자동완성 최신 통합 검색 API 경로
         url = f'https://m.stock.naver.com/api/json/search/searchListJson.nhn?keyword={encoded_q}'
         res = requests.get(url, headers=NAVER_HEADERS, timeout=5)
 
         if res.status_code == 200:
             data = res.json()
-            # 검색 결과 파싱 (result.siteData.codeCombine 또는 result.stockData 등)
             result_data = data.get('result', {})
             stocks = result_data.get('stockData', []) or result_data.get('siteData', {}).get('codeCombine', [])
             
@@ -88,27 +85,39 @@ def get_stock_price(
             status_code=400, content={'error': 'Code is required'}
         )
 
+    # 해외주식은 다중 티커 시도, 국내주식은 pure 종목코드 사용
     tickers = (
         [f'{code}.O', f'{code}.N', f'{code}.AM'] if is_us else [code]
     )
 
     for ticker in tickers:
-        try:
-            url = f'https://m.stock.naver.com/api/stock/{ticker}/price?pageSize=120&page=1'
-            res = requests.get(url, headers=NAVER_HEADERS, timeout=5)
+        # 1차 시도: 네이버 모바일 주가 시계열 API
+        endpoints = [
+            f'https://m.stock.naver.com/api/stock/{ticker}/price?pageSize=120&page=1',
+            f'https://m.stock.naver.com/api/stock/{ticker}/trend?pageSize=120&page=1'
+        ]
 
-            if res.status_code == 200:
-                raw_data = res.json()
-                price_list = []
-                if isinstance(raw_data, list):
-                    price_list = raw_data
-                elif isinstance(raw_data, dict):
-                    price_list = raw_data.get('priceList', [])
+        for url in endpoints:
+            try:
+                res = requests.get(url, headers=NAVER_HEADERS, timeout=5)
 
-                if price_list:
-                    return {'ticker': ticker, 'priceList': price_list}
-        except Exception as e:
-            print(f'Price Fetch Error ({ticker}): {e}')
+                if res.status_code == 200:
+                    raw_data = res.json()
+                    price_list = []
+                    
+                    if isinstance(raw_data, list):
+                        price_list = raw_data
+                    elif isinstance(raw_data, dict):
+                        price_list = (
+                            raw_data.get('priceList', []) 
+                            or raw_data.get('prices', [])
+                            or raw_data.get('result', [])
+                        )
+
+                    if price_list:
+                        return {'ticker': ticker, 'priceList': price_list}
+            except Exception as e:
+                print(f'Price Fetch Error ({ticker} - {url}): {e}')
 
     return JSONResponse(
         status_code=404, content={'error': 'Failed to fetch price data'}
