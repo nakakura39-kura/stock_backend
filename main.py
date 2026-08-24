@@ -1,5 +1,6 @@
 import urllib.parse
 import requests
+import yfinance as yf
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -23,7 +24,7 @@ HEADERS = {
 def root():
     return {'status': 'ok', 'message': 'Stock Backend API Server'}
 
-# 1. 통합 검색 API (한글 종목명 / 미국 Ticker / 6자리 코드)
+# 1. 한글/영문 검색어 ➔ 정확한 종목코드/Ticker 변환
 @app.get('/search')
 @app.get('/api/search')
 def search_stock(query: str = Query('', alias='query')):
@@ -31,34 +32,40 @@ def search_stock(query: str = Query('', alias='query')):
     if not q:
         return {'code': '005930', 'name': '삼성전자', 'is_us': False}
 
-    # 미국 주식 알파벳 Ticker (예: RXRX, TSLA, AAPL)
+    # 영문 Ticker (미국 주식)
     if q.isalpha() and len(q) <= 5:
-        return {'code': q.upper(), 'name': q.upper(), 'is_us': True}
+        ticker_symbol = q.upper()
+        return {'code': ticker_symbol, 'name': ticker_symbol, 'is_us': True}
 
-    # 국내 6자리 종목코드
+    # 6자리 종목코드 (국내 주식)
     if q.isdigit() and len(q) == 6:
         return {'code': q, 'name': f"종목({q})", 'is_us': False}
 
-    # 한글 종목명 ➔ 종목코드 변환 (네이버 검색)
+    # 한글 종목명 네이버 검색
     try:
         encoded_q = urllib.parse.quote(q)
         url = f"https://ac.stock.naver.com/ac?q={encoded_q}&target=stock"
         res = requests.get(url, headers=HEADERS, timeout=5)
         if res.status_code == 200:
             items = res.json().get('items', [])
-            if items:
+            if items and len(items) > 0:
                 first = items[0]
+                code = first[0]
+                name = first[1]
+                market = first[2] if len(first) > 2 else ''
+                is_us = market.upper() in ['NASDAQ', 'NYSE', 'AMEX']
                 return {
-                    'code': first[0],
-                    'name': first[1],
-                    'is_us': False,
+                    'code': code,
+                    'name': name,
+                    'is_us': is_us,
                 }
     except Exception as e:
         print(f"Search Error: {e}")
 
     return {'code': q, 'name': q, 'is_us': False}
 
-# 2. 실시간 주가 조회 API
+
+# 2. 실시간 주가 데이터 조회 (yfinance 기반)
 @app.get('/stock-price')
 @app.get('/api/stock-price')
 def get_stock_price(
@@ -69,45 +76,41 @@ def get_stock_price(
         return JSONResponse(status_code=400, content={'error': 'Code is required'})
 
     try:
-        # 미국 주식인 경우
-        if is_us or (clean_code.isalpha() and not clean_code.isdigit()):
-            url = f"https://api.stock.naver.com/stock/{clean_code}.O/basic"
-            res = requests.get(url, headers=HEADERS, timeout=5)
-            if res.status_code == 200:
-                data = res.json()
-                close_price = data.get('closePrice') or data.get('nowVal')
-                stock_name = data.get('stockName') or clean_code
-                if close_price:
-                    return {
-                        'ticker': clean_code,
-                        'priceList': [{
-                            'localTradedAt': 'today',
-                            'closePrice': str(close_price).replace(',', ''),
-                            'stockName': stock_name
-                        }]
-                    }
+        # Ticker 설정
+        if is_us or clean_code.isalpha():
+            ticker_symbol = clean_code.upper()
+        else:
+            # 국내 주식 코스피/코스닥 처리 (.KS 우선 조회 후 실패시 .KQ)
+            ticker_symbol = f"{clean_code}.KS"
 
-        # 국내 주식인 경우
-        url = f"https://m.stock.naver.com/api/stock/{clean_code}/basic"
-        res = requests.get(url, headers=HEADERS, timeout=5)
-        if res.status_code == 200:
-            data = res.json()
-            close_price = data.get('closePrice') or data.get('nowVal')
-            stock_name = data.get('stockName') or clean_code
-            if close_price:
-                return {
-                    'ticker': clean_code,
-                    'priceList': [{
+        ticker = yf.Ticker(ticker_symbol)
+        df = ticker.history(period='5d')
+
+        if df.empty and not is_us and not clean_code.isalpha():
+            # 코스닥 재시도
+            ticker_symbol = f"{clean_code}.KQ"
+            ticker = yf.Ticker(ticker_symbol)
+            df = ticker.history(period='5d')
+
+        if not df.empty:
+            last_price = float(df['Close'].iloc[-1])
+            stock_name = clean_code
+            try:
+                stock_name = ticker.info.get('shortName') or ticker.info.get('longName') or clean_code
+            except Exception:
+                pass
+
+            return {
+                'ticker': clean_code,
+                'priceList': [
+                    {
                         'localTradedAt': 'today',
-                        'closePrice': str(close_price).replace(',', ''),
+                        'closePrice': str(round(last_price, 2)),
                         'stockName': stock_name
-                    }]
-                }
+                    }
+                ]
+            }
     except Exception as e:
-        print(f"Price Error: {e}")
+        print(f"yfinance Fetch Error: {e}")
 
-    # 기본 예비 응답 (오류 방지용 기본값)
-    return {
-        'ticker': clean_code,
-        'priceList': [{'localTradedAt': 'today', 'closePrice': '10000', 'stockName': clean_code}]
-    }
+    return JSONResponse(status_code=500, content={'error': f'Failed to fetch price for {clean_code}'})
