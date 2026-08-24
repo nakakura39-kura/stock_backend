@@ -5,191 +5,253 @@ from typing import Dict, Any, List, Tuple
 from sklearn.cluster import KMeans
 from sklearn.metrics.pairwise import cosine_similarity
 
-class MultiWindowPatternEngine:
+
+class MultiTimeframePatternEngine:
+    """1일~1주일 트레이딩용 멀티타임프레임 차트 분석 엔진.
+
+    - 월봉: 장기 구조
+    - 일봉: 중기 구조 + 과거 유사패턴
+    - 60분/15분: 단기 구조
+    - 종가/캔들/거래량/ATR/가격위치 반영
+    - Top-K 과거 유사사례의 미래 D+1~D+5 경로를 K-Means로 3개 시나리오화
+    """
+
     def __init__(self, forecast_horizon: int = 5, top_k: int = 50):
-        self.forecast_horizon = forecast_horizon  # D+1 ~ D+5 (5일)
-        self.top_k = top_k  # 표본 추출 수 (Top 50~100)
-        
-        # Multi-Window 설정 (5일: 단기, 10일: 중단기, 20일: 바닥, 60일: 추세)
+        self.forecast_horizon = forecast_horizon
+        self.top_k = top_k
         self.windows = [5, 10, 20, 60]
-        self.window_weights = {5: 0.35, 10: 0.25, 20: 0.25, 60: 0.15}
+        self.window_weights = {5: 0.30, 10: 0.25, 20: 0.25, 60: 0.20}
 
-    def fetch_historical_ohlcv(self, code: str, is_us: bool, period: str = "5y") -> pd.DataFrame:
-        """
-        yfinance를 이용해 과거 5년~10년치 OHLCV(시가/고가/저가/종가/거래량) 일봉 수집
-        국내주식: 005930 -> 005930.KS (코스피) / 035720 -> 035720.KQ (코스닥 시도)
-        """
-        ticker_symbol = code.upper().strip()
+    # ---------- data ----------
+    def fetch_daily(self, code: str, is_us: bool, period: str = "5y") -> pd.DataFrame:
+        symbols = [code.upper().strip()]
         if not is_us and code.isdigit():
-            # 국내주식 티커 포맷팅 (KOSPI default, 실패시 KOSDAQ fallback)
-            ticker_symbol = f"{code}.KS"
+            symbols = [f"{code}.KS", f"{code}.KQ"]
+        for symbol in symbols:
+            try:
+                df = yf.Ticker(symbol).history(period=period, auto_adjust=False)
+                if not df.empty:
+                    df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
+                    if len(df) >= 120:
+                        return df
+            except Exception as e:
+                print(f"Daily fetch error {symbol}: {e}")
+        return pd.DataFrame()
 
-        try:
-            ticker = yf.Ticker(ticker_symbol)
-            df = ticker.history(period=period)
-            
-            # KOSPI 실패 시 KOSDAQ(.KQ) 재시도
-            if df.empty and not is_us and code.isdigit():
-                ticker = yf.Ticker(f"{code}.KQ")
-                df = ticker.history(period=period)
+    def fetch_monthly(self, code: str, is_us: bool, period: str = "10y") -> pd.DataFrame:
+        symbols = [code.upper().strip()]
+        if not is_us and code.isdigit():
+            symbols = [f"{code}.KS", f"{code}.KQ"]
+        for symbol in symbols:
+            try:
+                df = yf.Ticker(symbol).history(period=period, interval="1mo", auto_adjust=False)
+                if not df.empty:
+                    return df[["Open", "High", "Low", "Close", "Volume"]].dropna()
+            except Exception as e:
+                print(f"Monthly fetch error {symbol}: {e}")
+        return pd.DataFrame()
 
-            if df.empty or len(df) < 120:
-                return pd.DataFrame()
+    def fetch_intraday(self, code: str, is_us: bool, interval: str = "60m") -> pd.DataFrame:
+        # Yahoo 제한을 고려해 60m/15m은 최근 구간만 조회한다.
+        period = "60d" if interval == "60m" else "30d"
+        symbol = code.upper().strip()
+        if not is_us and code.isdigit():
+            # KOSPI 우선, 실패하면 KOSDAQ
+            candidates = [f"{code}.KS", f"{code}.KQ"]
+        else:
+            candidates = [symbol]
+        for ticker_symbol in candidates:
+            try:
+                df = yf.Ticker(ticker_symbol).history(period=period, interval=interval, auto_adjust=False)
+                if not df.empty:
+                    return df[["Open", "High", "Low", "Close", "Volume"]].dropna()
+            except Exception as e:
+                print(f"Intraday fetch error {ticker_symbol} {interval}: {e}")
+        return pd.DataFrame()
 
-            # 데이터 정형화
-            df = df[['Open', 'High', 'Low', 'Close', 'Volume']].dropna()
-            return df
-        except Exception as e:
-            print(f"Data Fetch Error ({code}): {e}")
-            return pd.DataFrame()
-
-    def extract_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        30년차 애널리스트 관점 Multi-Feature 계산
-        가격 + 이평선(5/20/60) + 캔들구조(몸통/꼬리) + 거래량 + ATR
-        """
+    # ---------- features ----------
+    @staticmethod
+    def extract_features(df: pd.DataFrame) -> pd.DataFrame:
         data = df.copy()
-        close = data['Close']
-        high = data['High']
-        low = data['Low']
-        vol = data['Volume']
+        close, high, low, op, vol = data["Close"], data["High"], data["Low"], data["Open"], data["Volume"]
+        for n in (5, 20, 60, 120):
+            data[f"ma{n}"] = close.rolling(n).mean()
+            data[f"ma{n}_ratio"] = close / data[f"ma{n"]} - 1.0
+        rng = (high - low).replace(0, np.nan)
+        data["body_ratio"] = (close - op) / rng
+        data["upper_shadow_ratio"] = (high - np.maximum(op, close)) / rng
+        data["lower_shadow_ratio"] = (np.minimum(op, close) - low) / rng
+        data["close_location"] = (close - low) / rng
+        data["gap_ratio"] = op / close.shift(1) - 1.0
+        data["vol_ratio"] = vol / vol.rolling(20).mean() - 1.0
+        tr = pd.concat([
+            high - low,
+            (high - close.shift(1)).abs(),
+            (low - close.shift(1)).abs(),
+        ], axis=1).max(axis=1)
+        data["atr_ratio"] = tr.rolling(14).mean() / close
+        data["close_pct"] = close.pct_change()
+        data["ret5"] = close.pct_change(5)
+        data["ret20"] = close.pct_change(20)
+        data["position20"] = (close - close.rolling(20).min()) / (close.rolling(20).max() - close.rolling(20).min()).replace(0, np.nan)
+        data["position60"] = (close - close.rolling(60).min()) / (close.rolling(60).max() - close.rolling(60).min()).replace(0, np.nan)
+        return data.replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
-        # 1. 이동평균선 이격도 (MA Ratios)
-        data['ma5_ratio'] = (close / close.rolling(5).mean()) - 1.0
-        data['ma20_ratio'] = (close / close.rolling(20).mean()) - 1.0
-        data['ma60_ratio'] = (close / close.rolling(60).mean()) - 1.0
+    @staticmethod
+    def _cos(a: np.ndarray, b: np.ndarray) -> float:
+        if len(a) != len(b):
+            return 0.0
+        na, nb = np.linalg.norm(a), np.linalg.norm(b)
+        if na == 0 or nb == 0:
+            return 0.0
+        return float(np.dot(a, b) / (na * nb))
 
-        # 2. 캔들 구조 (Body Direction / Shadow / Close Location)
-        candle_range = (high - low).replace(0, np.nan)
-        data['body_ratio'] = (close - data['Open']) / candle_range
-        data['close_location'] = (close - low) / candle_range  # 종가 위치 (0~1)
+    @staticmethod
+    def _corr(a: np.ndarray, b: np.ndarray) -> float:
+        if len(a) < 2 or np.std(a) == 0 or np.std(b) == 0:
+            return 0.0
+        return float(np.corrcoef(a, b)[0, 1])
 
-        # 3. 거래량 비율 (Volume Profile)
-        data['vol_ratio'] = (vol / vol.rolling(20).mean()) - 1.0
+    def calculate_similarity(self, current: pd.DataFrame, past: pd.DataFrame) -> float:
+        if len(current) != len(past) or len(current) < 2:
+            return 0.0
+        # 가격/캔들/거래량/변동성/가격위치/이평 구조
+        price = 0.5 * self._cos(current.close_pct.values, past.close_pct.values) + 0.5 * ((self._corr(current.close_pct.values, past.close_pct.values) + 1) / 2)
+        ma_cur = np.column_stack([current.ma5_ratio, current.ma20_ratio, current.ma60_ratio, current.ma120_ratio]).flatten()
+        ma_past = np.column_stack([past.ma5_ratio, past.ma20_ratio, past.ma60_ratio, past.ma120_ratio]).flatten()
+        ma = 0.5 * self._cos(ma_cur, ma_past) + 0.5 * ((self._corr(ma_cur, ma_past) + 1) / 2)
+        candle_cur = np.column_stack([current.body_ratio, current.upper_shadow_ratio, current.lower_shadow_ratio, current.close_location, current.gap_ratio]).flatten()
+        candle_past = np.column_stack([past.body_ratio, past.upper_shadow_ratio, past.lower_shadow_ratio, past.close_location, past.gap_ratio]).flatten()
+        candle = 0.5 * self._cos(candle_cur, candle_past) + 0.5 * ((self._corr(candle_cur, candle_past) + 1) / 2)
+        volume = 0.5 * self._cos(current.vol_ratio.values, past.vol_ratio.values) + 0.5 * ((self._corr(current.vol_ratio.values, past.vol_ratio.values) + 1) / 2)
+        volatility = 0.5 * self._cos(current.atr_ratio.values, past.atr_ratio.values) + 0.5 * ((self._corr(current.atr_ratio.values, past.atr_ratio.values) + 1) / 2)
+        position = 0.5 * self._cos(current.position20.values, past.position20.values) + 0.5 * ((self._corr(current.position20.values, past.position20.values) + 1) / 2)
+        score = 0.28 * price + 0.22 * ma + 0.18 * candle + 0.12 * volume + 0.10 * volatility + 0.10 * position
+        return float(np.clip(score, 0.0, 1.0))
 
-        # 4. 변동성 (Normalized ATR)
-        tr = np.maximum(high - low, np.maximum(abs(high - close.shift(1)), abs(low - close.shift(1))))
-        data['atr_ratio'] = (tr.rolling(14).mean() / close)
-
-        # 5. 가격 일일 수익률 (Percentage Change)
-        data['close_pct'] = close.pct_change()
-
-        return data.fillna(0)
-
-    def calculate_single_window_similarity(self, current_feat: pd.DataFrame, past_feat: pd.DataFrame) -> float:
-        """
-        단일 윈도우 프레임 내 Multi-Feature Similarity Score 계산
-        """
-        weights = {
-            'close_pct': 0.35,
-            'ma_structure': 0.25,
-            'close_location': 0.15,
-            'vol_ratio': 0.15,
-            'atr_ratio': 0.10
-        }
-
-        # 1. 가격 형태
-        sim_price = cosine_similarity([current_feat['close_pct'].values], [past_feat['close_pct'].values])[0][0]
-
-        # 2. 이평선 배열 구조 (5/20/60일)
-        curr_ma = np.column_stack([current_feat['ma5_ratio'], current_feat['ma20_ratio'], current_feat['ma60_ratio']]).flatten()
-        past_ma = np.column_stack([past_feat['ma5_ratio'], past_feat['ma20_ratio'], past_feat['ma60_ratio']]).flatten()
-        sim_ma = cosine_similarity([curr_ma], [past_ma])[0][0]
-
-        # 3. 종가 위치 / 캔들 모양
-        sim_candle = cosine_similarity([current_feat['close_location'].values], [past_feat['close_location'].values])[0][0]
-
-        # 4. 거래량 패턴
-        sim_vol = cosine_similarity([current_feat['vol_ratio'].values], [past_feat['vol_ratio'].values])[0][0]
-
-        return float(
-            weights['close_pct'] * sim_price +
-            weights['ma_structure'] * sim_ma +
-            weights['close_location'] * sim_candle +
-            weights['vol_ratio'] * sim_vol
-        )
-
-    def search_ensemble_patterns(self, df: pd.DataFrame) -> np.ndarray:
-        """
-        5년(약 1250개 일봉) 데이터 슬라이딩 검색
-        Multi-Window (5/10/20/60일) 앙상블 가중합 점수로 Top N 추출
-        """
-        feature_df = self.extract_features(df)
-        prices = df['Close'].values
-        n_samples = len(df)
-
-        max_w = max(self.windows) # 60
-        if n_samples < max_w + self.forecast_horizon + 60:
-            return np.array([])
-
-        future_returns_list = []
-        ensemble_scores = []
-
-        # 과거 전체 구간 슬라이딩
-        for i in range(60, n_samples - max_w - self.forecast_horizon):
-            composite_score = 0.0
-
-            # 5, 10, 20, 60일 각각 윈도우 비교 후 가중 합산
+    def search_patterns(self, df: pd.DataFrame) -> Tuple[np.ndarray, List[float]]:
+        feat = self.extract_features(df)
+        prices = df["Close"].values.astype(float)
+        n = len(df)
+        max_w = max(self.windows)
+        if n < max_w + self.forecast_horizon + 60:
+            return np.empty((0, self.forecast_horizon)), []
+        futures, scores = [], []
+        for end in range(max_w, n - self.forecast_horizon):
+            score = 0.0
             for w in self.windows:
-                curr_w_feat = feature_df.iloc[-w:]
-                past_w_feat = feature_df.iloc[i + max_w - w : i + max_w]
-                
-                w_score = self.calculate_single_window_similarity(curr_w_feat, past_w_feat)
-                composite_score += w_score * self.window_weights[w]
+                current = feat.iloc[-w:]
+                past = feat.iloc[end - w:end]
+                score += self.calculate_similarity(current, past) * self.window_weights[w]
+            base = prices[end - 1]
+            future = prices[end:end + self.forecast_horizon] / base - 1.0
+            futures.append(future)
+            scores.append(score)
+        scores_np = np.asarray(scores)
+        futures_np = np.asarray(futures)
+        idx = np.argsort(scores_np)[::-1][: min(self.top_k, len(scores_np))]
+        return futures_np[idx], scores_np[idx].tolist()
 
-            # 과거 해당 시점 기준 미래 D+1 ~ D+5 수익률 계산
-            past_base_price = prices[i + max_w - 1]
-            future_prices = prices[i + max_w : i + max_w + self.forecast_horizon]
-            future_return_path = (future_prices / past_base_price) - 1.0
-
-            ensemble_scores.append(composite_score)
-            future_returns_list.append(future_return_path)
-
-        ensemble_scores = np.array(ensemble_scores)
-        future_returns_list = np.array(future_returns_list)
-
-        # 앙상블 스코어 기준 Top K (50개) 사례 추출
-        top_k_indices = np.argsort(ensemble_scores)[::-1][:self.top_k]
-        return future_returns_list[top_k_indices]
-
-
-def generate_3_scenarios_from_kmeans(future_returns_matrix: np.ndarray) -> Dict[str, Any]:
-    """
-    Top 50개 미래 D+1~D+5 경로를 K-Means(K=3)로 클러스터링하여 시나리오 생성
-    """
-    if len(future_returns_matrix) < 3:
-        # 데이터 부족 시 Fallback
+    # ---------- timeframe analysis ----------
+    @staticmethod
+    def timeframe_summary(df: pd.DataFrame, label: str) -> Dict[str, Any]:
+        if df.empty or len(df) < 2:
+            return {"timeframe": label, "available": False}
+        f = MultiTimeframePatternEngine.extract_features(df)
+        last = f.iloc[-1]
+        close = float(last.Close)
+        ma5, ma20, ma60 = float(last.ma5), float(last.ma20), float(last.ma60)
+        score = 50.0
+        if close > ma20: score += 15
+        if ma20 > ma60: score += 15
+        if float(last.close_location) >= 0.65: score += 8
+        if float(last.vol_ratio) >= 0.20: score += 5
+        if float(last.ret20) > 0: score += 7
+        score = float(np.clip(score, 0, 100))
+        if score >= 65: trend = "상승"
+        elif score <= 35: trend = "하락"
+        else: trend = "중립"
         return {
-            "scenarioA": {"probability": 50.0, "changeRate": 3.5, "pathRatio": [0.0, 0.008, 0.015, 0.025, 0.035]},
-            "scenarioB": {"probability": 35.0, "changeRate": 0.5, "pathRatio": [0.0, 0.002, 0.004, 0.003, 0.005]},
-            "scenarioC": {"probability": 15.0, "changeRate": -2.8, "pathRatio": [0.0, -0.008, -0.015, -0.022, -0.028]},
-            "confidence": 60.0
+            "timeframe": label,
+            "available": True,
+            "close": close,
+            "trend": trend,
+            "trendScore": round(score, 1),
+            "ma5": round(ma5, 4), "ma20": round(ma20, 4), "ma60": round(ma60, 4),
+            "closeVsMA20": round(float(last.ma20_ratio) * 100, 2),
+            "closeVsMA60": round(float(last.ma60_ratio) * 100, 2),
+            "closeLocation": round(float(last.close_location) * 100, 1),
+            "volumeRatio": round((float(last.vol_ratio) + 1) * 100, 1),
+            "atrRatio": round(float(last.atr_ratio) * 100, 2),
         }
 
-    kmeans = KMeans(n_clusters=3, random_state=42, n_init=10)
-    labels = kmeans.fit_predict(future_returns_matrix)
-
-    centers = kmeans.cluster_centers_
-    counts = np.bincount(labels)
-    total_samples = len(labels)
-
-    # D+5 최종 수익률 순 정렬 (상승, 중립, 하락)
-    sorted_indices = np.argsort(centers[:, -1])[::-1]
-    scenario_keys = ['scenarioA', 'scenarioB', 'scenarioC']
-    results = {}
-
-    for idx, cluster_idx in enumerate(sorted_indices):
-        key = scenario_keys[idx]
-        path = [0.0] + centers[cluster_idx].tolist()  # D+0(0.0) 포함 6개 지점
-        prob = round((counts[cluster_idx] / total_samples) * 100, 1)
-        final_change = round(path[-1] * 100, 1)
-
-        results[key] = {
-            "probability": prob,
-            "changeRate": final_change,
-            "pathRatio": [round(x, 4) for x in path]
+    def close_structure(self, daily: pd.DataFrame) -> Dict[str, Any]:
+        f = self.extract_features(daily)
+        x = f.iloc[-1]
+        return {
+            "score": round(float(np.clip(50 + x.close_location * 25 + x.body_ratio * 15 + min(max(x.vol_ratio, -1), 1) * 10, 0, 100)), 1),
+            "closeLocation": round(float(x.close_location) * 100, 1),
+            "bodyRatio": round(float(x.body_ratio), 3),
+            "upperShadowRatio": round(float(x.upper_shadow_ratio), 3),
+            "lowerShadowRatio": round(float(x.lower_shadow_ratio), 3),
+            "gapRatio": round(float(x.gap_ratio) * 100, 2),
         }
 
-    # 최고 확률 클러스터의 비중을 Confidence(신뢰도)로 활용
-    results["confidence"] = max([results[k]["probability"] for k in scenario_keys])
-    return results
+    # ---------- scenario ----------
+    def scenarios(self, future_matrix: np.ndarray, similarity_scores: List[float]) -> Dict[str, Any]:
+        if len(future_matrix) < 3:
+            return {"matchedCount": len(future_matrix), "confidence": 0.0, "scenarios": [], "error": "유사 패턴 부족"}
+        k = min(3, len(future_matrix))
+        model = KMeans(n_clusters=k, random_state=42, n_init=20)
+        labels = model.fit_predict(future_matrix)
+        centers = model.cluster_centers_
+        scores = np.asarray(similarity_scores, dtype=float)
+        # 각 사례의 유사도에 따른 가중 확률
+        weights = np.clip(scores, 0.0, 1.0) + 1e-6
+        weighted_counts = np.array([weights[labels == i].sum() for i in range(k)])
+        probs = weighted_counts / weighted_counts.sum() * 100
+        # 최종 수익률로 상승/중립/하락 정렬
+        order = np.argsort(centers[:, -1])[::-1]
+        scenarios = []
+        names = ["상승 지속", "상승 후 조정", "하락 전환"]
+        for rank, ci in enumerate(order):
+            path = [0.0] + centers[ci].tolist()
+            final = float(path[-1])
+            # 실제 경로 특성으로 이름 보정
+            drawdown = float(np.min(centers[ci]))
+            if final < 0:
+                name = "하락 전환"
+            elif final > 0 and drawdown < -0.02:
+                name = "상승 후 조정"
+            else:
+                name = "상승 지속"
+            scenarios.append({
+                "rank": rank + 1,
+                "name": name if rank < 3 else names[rank],
+                "probability": round(float(probs[ci]), 1),
+                "finalReturn": round(final * 100, 2),
+                "path": [round(float(x) * 100, 3) for x in path],
+            })
+        confidence = float(np.clip(np.max(probs) * (0.65 + 0.35 * np.mean(scores)), 0, 100))
+        return {"matchedCount": len(future_matrix), "confidence": round(confidence, 1), "scenarios": scenarios}
+
+    def analyze(self, daily: pd.DataFrame, monthly: pd.DataFrame, h60: pd.DataFrame, m15: pd.DataFrame) -> Dict[str, Any]:
+        matrix, sims = self.search_patterns(daily)
+        scenario = self.scenarios(matrix, sims)
+        current = float(daily.Close.iloc[-1]) if not daily.empty else 0.0
+        return {
+            "currentPrice": current,
+            "timeframes": {
+                "monthly": self.timeframe_summary(monthly, "월봉"),
+                "daily": self.timeframe_summary(daily, "일봉"),
+                "hour60": self.timeframe_summary(h60, "60분봉"),
+                "minute15": self.timeframe_summary(m15, "15분봉"),
+            },
+            "closeStructure": self.close_structure(daily),
+            "scenario": scenario,
+            "similarity": {
+                "topK": len(sims),
+                "average": round(float(np.mean(sims)) * 100, 1) if sims else 0.0,
+                "scores": [round(float(s) * 100, 2) for s in sims[:10]],
+            },
+        }

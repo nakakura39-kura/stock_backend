@@ -1,103 +1,98 @@
-import numpy as np
 import urllib.parse
 import requests
-from fastapi import FastAPI, Query
+import numpy as np
+from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from backend_pipeline import MultiTimeframePatternEngine
 
-# 백엔드 파이프라인 엔진 불러오기
-from backend_pipeline import MultiWindowPatternEngine, generate_3_scenarios_from_kmeans
+app = FastAPI(title="Stock AI Chart Analyzer", version="2.0.0")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
-app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=['*'],
-    allow_credentials=True,
-    allow_methods=['*'],
-    allow_headers=['*'],
-)
-
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    'Referer': 'https://m.stock.naver.com/'
+HEADERS = {"User-Agent": "Mozilla/5.0", "Referer": "https://m.stock.naver.com/"}
+STOCK_MAP = {
+    "삼성전자": {"code": "005930", "name": "삼성전자", "is_us": False},
+    "SK하이닉스": {"code": "000660", "name": "SK하이닉스", "is_us": False},
+    "네이버": {"code": "035420", "name": "NAVER", "is_us": False},
+    "NAVER": {"code": "035420", "name": "NAVER", "is_us": False},
+    "TSLA": {"code": "TSLA", "name": "테슬라", "is_us": True},
+    "AAPL": {"code": "AAPL", "name": "애플", "is_us": True},
+    "NVDA": {"code": "NVDA", "name": "엔비디아", "is_us": True},
+    "RXRX": {"code": "RXRX", "name": "Recursion Pharma", "is_us": True},
 }
-
-# Multi-Window 파이프라인 엔진 초기화 (D+5 프레임, Top 50개 추출)
-engine = MultiWindowPatternEngine(forecast_horizon=5, top_k=50)
+engine = MultiTimeframePatternEngine(forecast_horizon=5, top_k=50)
 
 
-@app.get('/')
-def root():
-    return {'status': 'ok', 'message': 'Stock Backend AI Engine Active'}
+def normalize_code(code: str, is_us: bool) -> str:
+    value = code.strip().upper()
+    if not is_us and value.startswith("A") and len(value) == 7 and value[1:].isdigit():
+        value = value[1:]
+    value = value.replace(".KS", "").replace(".KQ", "")
+    return value
 
 
-# 1. 종목 검색 API
-@app.get('/search')
-@app.get('/api/search')
-def search_stock(query: str = Query('', alias='query')):
-    q = query.strip()
+def search_name(q: str):
     if not q:
-        return {'code': '005930', 'name': '삼성전자', 'is_us': False}
-
+        return STOCK_MAP["삼성전자"]
+    for k, v in STOCK_MAP.items():
+        if q.lower() == k.lower():
+            return v
     if q.isalpha() and len(q) <= 5:
-        return {'code': q.upper(), 'name': q.upper(), 'is_us': True}
-
+        return {"code": q.upper(), "name": q.upper(), "is_us": True}
     if q.isdigit() and len(q) == 6:
-        return {'code': q, 'name': f"종목({q})", 'is_us': False}
-
+        return {"code": q, "name": q, "is_us": False}
     try:
-        encoded_q = urllib.parse.quote(q)
-        url = f"https://ac.stock.naver.com/ac?q={encoded_q}&target=stock"
+        url = f"https://ac.stock.naver.com/ac?q={urllib.parse.quote(q)}&target=stock"
         res = requests.get(url, headers=HEADERS, timeout=5)
-        if res.status_code == 200:
-            items = res.json().get('items', [])
+        if res.ok:
+            items = res.json().get("items", [])
             if items:
                 first = items[0]
-                code, name = first[0], first[1]
-                market = first[2] if len(first) > 2 else ''
-                is_us = market.upper() in ['NASDAQ', 'NYSE', 'AMEX']
-                return {'code': code, 'name': name, 'is_us': is_us}
+                market = first[2] if len(first) > 2 else ""
+                return {"code": first[0], "name": first[1], "is_us": market.upper() in ["NASDAQ", "NYSE", "AMEX"]}
     except Exception as e:
-        print(f"Search API Error: {e}")
+        print("Search error:", e)
+    raise HTTPException(status_code=404, detail="종목을 찾지 못했습니다.")
 
-    return {'code': q, 'name': q, 'is_us': False}
+
+@app.get("/")
+def root():
+    return {"status": "ok", "message": "Stock AI Chart Analyzer Active", "version": "2.0.0"}
 
 
-# 2. 실시간 주가 + 5년 OHLCV 기반 AI 3개 시나리오 API
-@app.get('/stock-price')
-@app.get('/api/stock-price')
-def get_stock_price(
-    code: str = Query('', alias='code'), is_us: bool = Query(False, alias='is_us')
-):
-    clean_code = code.strip()
-    if not is_us and clean_code.startswith('A') and len(clean_code) == 7:
-    clean_code = clean_code[1:]
+@app.get("/search")
+@app.get("/api/search")
+def search_stock(query: str = Query("", alias="query")):
+    return search_name(query.strip())
 
-    # Step 1: 5년치 OHLCV 데이터 수집 (yfinance 기반)
-    df_historical = engine.fetch_historical_ohlcv(clean_code, is_us, period="5y")
 
-    # Step 2: Multi-Window (5/10/20/60일) 앙상블 패턴 검색
-    if not df_historical.empty:
-        current_price = float(df_historical['Close'].iloc[-1])
-        stock_name = clean_code
+@app.get("/stock-price")
+@app.get("/api/stock-price")
+def get_stock_price(code: str = Query("", alias="code"), is_us: bool = Query(False, alias="is_us")):
+    if not code.strip():
+        return JSONResponse(status_code=400, content={"error": "Code is required"})
+    clean = normalize_code(code, is_us)
+    daily = engine.fetch_daily(clean, is_us, "5y")
+    if daily.empty:
+        return JSONResponse(status_code=503, content={"error": "주가 데이터를 가져오지 못했습니다.", "ticker": clean})
+    monthly = engine.fetch_monthly(clean, is_us, "10y")
+    h60 = engine.fetch_intraday(clean, is_us, "60m")
+    m15 = engine.fetch_intraday(clean, is_us, "15m")
+    result = engine.analyze(daily, monthly, h60, m15)
+    return {
+        "ticker": clean,
+        "priceList": [{"localTradedAt": str(daily.index[-1]), "closePrice": str(result["currentPrice"]), "stockName": clean, "isUs": is_us}],
+        "aiPrediction": result["scenario"],
+        "analysis": result,
+    }
 
-        # Top 50개 과거 사례의 미래 D+1 ~ D+5 수익률 매트릭스 계산
-        future_returns_matrix = engine.search_ensemble_patterns(df_historical)
-        
-        # K-Means 클러스터링 기반 시나리오 A, B, C 생성
-        ai_prediction = generate_3_scenarios_from_kmeans(future_returns_matrix)
-    else:
-        # 데이터 수집 실패 시 기본 예비값
-        current_price = 220.0 if is_us else 75000.0
-        ai_prediction = generate_3_scenarios_from_kmeans(np.array([]))
 
-    # 프론트엔드 반환 포맷
-    if df_historical.empty:
-    return JSONResponse(
-        status_code=503,
-        content={
-            'error': '주가 데이터를 가져오지 못했습니다.',
-            'ticker': clean_code
-        }
-    )
+@app.get("/analyze")
+@app.get("/api/analyze")
+def analyze_stock(code: str = Query("", alias="code"), is_us: bool = Query(False, alias="is_us")):
+    return get_stock_price(code, is_us)
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
