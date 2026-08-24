@@ -1,3 +1,4 @@
+import numpy as np
 import urllib.parse
 import requests
 from fastapi import FastAPI, Query
@@ -69,9 +70,9 @@ def search_stock(query: str = Query('', alias='query')):
 def get_stock_price(
     code: str = Query('', alias='code'), is_us: bool = Query(False, alias='is_us')
 ):
-    clean_code = code.strip().replace('A', '')
-    if not clean_code:
-        return JSONResponse(status_code=400, content={'error': 'Code is required'})
+    clean_code = code.strip()
+    if not is_us and clean_code.startswith('A') and len(clean_code) == 7:
+    clean_code = clean_code[1:]
 
     # Step 1: 5년치 OHLCV 데이터 수집 (yfinance 기반)
     df_historical = engine.fetch_historical_ohlcv(clean_code, is_us, period="5y")
@@ -92,13 +93,11 @@ def get_stock_price(
         ai_prediction = generate_3_scenarios_from_kmeans(np.array([]))
 
     # 프론트엔드 반환 포맷
-    return {
-        'ticker': clean_code,
-        'priceList': [{
-            'localTradedAt': 'today',
-            'closePrice': str(current_price),
-            'stockName': clean_code,
-            'isUs': is_us
-        }],
-        'aiPrediction': ai_prediction
-    }
+    if df_historical.empty:
+    return JSONResponse(
+        status_code=503,
+        content={
+            'error': '주가 데이터를 가져오지 못했습니다.',
+            'ticker': clean_code
+        }
+    )
