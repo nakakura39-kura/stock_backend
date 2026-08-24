@@ -1,6 +1,5 @@
 import urllib.parse
 import requests
-import yfinance as yf
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -15,14 +14,14 @@ app.add_middleware(
     allow_headers=['*'],
 )
 
-# 한국 주식 종목명-코드 매핑용 네이버 검색 API
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Referer': 'https://m.stock.naver.com/'
 }
 
 @app.get('/')
 def root():
-    return {'status': 'ok', 'message': 'Stock API Server with yfinance'}
+    return {'status': 'ok', 'message': 'Stock Backend API Server'}
 
 @app.get('/search')
 @app.get('/api/search')
@@ -39,7 +38,7 @@ def search_stock(query: str = Query('', alias='query')):
     if query.isdigit() and len(query) == 6:
         return {'code': query, 'name': f"종목({query})", 'is_us': False}
 
-    # 한글 종목명 검색 (네이버 검색 API 활용)
+    # 한글 종목명 네이버 통합 검색
     try:
         encoded_q = urllib.parse.quote(query)
         url = f"https://m.stock.naver.com/api/search/allList?query={encoded_q}"
@@ -71,32 +70,34 @@ def get_stock_price(
         return JSONResponse(status_code=400, content={'error': 'Code is required'})
 
     try:
-        # yfinance 티커 설정 (.KS = 코스피/코스닥 표준)
-        ticker_symbol = clean_code if is_us else (f"{clean_code}.KS" if len(clean_code) == 6 else clean_code)
-        
-        ticker = yf.Ticker(ticker_symbol)
-        # 최근 1개월 일별 데이터 가져오기
-        df = ticker.history(period="1mo")
-        
-        # KOSPI에 없으면 KOSDAQ(.KQ) 시도
-        if df.empty and not is_us and len(clean_code) == 6:
-            ticker_symbol = f"{clean_code}.KQ"
-            ticker = yf.Ticker(ticker_symbol)
-            df = ticker.history(period="1mo")
+        # 네이버 증권 시세 API 직접 조회 (국내/해외 자동 분기)
+        if is_us or clean_code.isalpha():
+            url = f"https://api.stock.naver.com/stock/{clean_code}/price"
+        else:
+            url = f"https://m.stock.naver.com/api/stock/{clean_code}/basic"
 
-        if not df.empty:
-            price_list = []
-            # 최근 날짜순 정렬
-            df_reversed = df.iloc[::-1]
-            for date, row in df_reversed.iterrows():
-                price_list.append({
-                    'localTradedAt': date.strftime('%Y-%m-%d'),
-                    'closePrice': str(int(row['Close'])),
-                    'stockName': clean_code
-                })
-            return {'ticker': clean_code, 'priceList': price_list}
+        res = requests.get(url, headers=HEADERS, timeout=5)
 
+        if res.status_code == 200:
+            data = res.json()
+            
+            # 국내 주식 처리 (closePrice, stockName)
+            close_price = data.get('closePrice') or data.get('nowVal')
+            stock_name = data.get('stockName') or data.get('stockNameEng') or clean_code
+            
+            if close_price:
+                # 반환 포맷 일치
+                return {
+                    'ticker': clean_code,
+                    'priceList': [
+                        {
+                            'localTradedAt': 'today',
+                            'closePrice': str(close_price).replace(',', ''),
+                            'stockName': stock_name
+                        }
+                    ]
+                }
     except Exception as e:
-        print(f"yfinance Fetch Error: {e}")
+        print(f"Fetch Error: {e}")
 
-    return JSONResponse(status_code=500, content={'error': 'Failed to fetch price'})
+    return JSONResponse(status_code=500, content={'error': f'Failed to fetch price for {clean_code}'})
