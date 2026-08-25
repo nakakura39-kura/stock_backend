@@ -8,7 +8,6 @@ from backend_pipeline import MultiTimeframePatternEngine
 
 app = FastAPI(title="Stock AI Multi-Timeframe Chart Analyzer", version="2.1.0")
 
-# CORS 방어벽 완전 허용 (프론트엔드 통신 오류 방지)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,13 +16,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-HEADERS = {"User-Agent": "Mozilla/5.0", "Referer": "https://m.stock.naver.com/"}
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Referer": "https://m.stock.naver.com/"
+}
 engine = MultiTimeframePatternEngine(forecast_horizon=5, top_k=50)
 
 def normalize_code(code: str, is_us: bool) -> str:
     val = code.strip().upper()
     if not is_us and val.startswith("A") and len(val) == 7 and val[1:].isdigit():
         val = val[1:]
+    # 중복 .KS/.KQ 결합 방지를 위해 클리닝만 수행
+    val = val.replace(".KS", "").replace(".KQ", "")
     return val
 
 def search_naver(q: str):
@@ -68,25 +72,14 @@ def analyze_stock(
     clean = normalize_code(code, is_us)
     
     try:
-        # 1차 데이터 수집 시도
+        # backend_pipeline 내부의 fetcher를 통해 조회
         daily = engine.fetch_daily(clean, is_us, "5y")
-        
-        # 한국 주식 데이터 수신 실패 시 심볼(.KS / .KQ) 보완 후 재시도
-        if (daily is None or daily.empty) and not is_us and not clean.endswith((".KS", ".KQ")):
-            for suffix in [".KS", ".KQ"]:
-                try_code = f"{clean}{suffix}"
-                daily_try = engine.fetch_daily(try_code, is_us, "5y")
-                if daily_try is not None and not daily_try.empty:
-                    daily = daily_try
-                    clean = try_code
-                    break
 
-        # 최종 데이터 조회 실패 시 예외 처리
         if daily is None or daily.empty:
             print(f"[DATA_ERROR] Ticker '{clean}' data fetch failed. (is_us={is_us})")
             return JSONResponse(
                 status_code=404, 
-                content={"error": f"'{clean}' 종목 주가 데이터를 찾을 수 없습니다. 코드를 확인해 주세요."}
+                content={"error": f"'{clean}' 종목의 주가 데이터를 수집하지 못했습니다."}
             )
 
         monthly = engine.fetch_monthly(clean, is_us, "10y")
