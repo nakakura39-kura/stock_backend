@@ -11,15 +11,25 @@ class MultiTimeframePatternEngine:
         self.windows = [5, 10, 20, 60]
         self.window_weights = {5: 0.30, 10: 0.25, 20: 0.25, 60: 0.20}
 
-    # ---------- Data Fetching (버그 수정 및 가짜 가격 제거) ----------
+    # yfinance MultiIndex 컬럼 정형화 헬퍼
+    @staticmethod
+    def _clean_df(df: pd.DataFrame) -> pd.DataFrame:
+        if df.empty:
+            return pd.DataFrame()
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        return df[["Open", "High", "Low", "Close", "Volume"]].dropna()
+
+    # ---------- Data Fetching ----------
     def fetch_daily(self, code: str, is_us: bool, period: str = "5y") -> pd.DataFrame:
         symbol = code.upper().strip()
         candidates = [symbol] if is_us else [f"{code}.KS", f"{code}.KQ"]
         for sym in candidates:
             try:
                 df = yf.Ticker(sym).history(period=period, auto_adjust=False)
-                if not df.empty and len(df) >= 120:
-                    return df[["Open", "High", "Low", "Close", "Volume"]].dropna()
+                cleaned = self._clean_df(df)
+                if not cleaned.empty and len(cleaned) >= 120:
+                    return cleaned
             except Exception as e:
                 print(f"Fetch daily error for {sym}: {e}")
         return pd.DataFrame()
@@ -30,8 +40,9 @@ class MultiTimeframePatternEngine:
         for sym in candidates:
             try:
                 df = yf.Ticker(sym).history(period=period, interval="1mo", auto_adjust=False)
-                if not df.empty:
-                    return df[["Open", "High", "Low", "Close", "Volume"]].dropna()
+                cleaned = self._clean_df(df)
+                if not cleaned.empty:
+                    return cleaned
             except Exception as e:
                 print(f"Fetch monthly error for {sym}: {e}")
         return pd.DataFrame()
@@ -43,13 +54,14 @@ class MultiTimeframePatternEngine:
         for sym in candidates:
             try:
                 df = yf.Ticker(sym).history(period=period, interval=interval, auto_adjust=False)
-                if not df.empty:
-                    return df[["Open", "High", "Low", "Close", "Volume"]].dropna()
+                cleaned = self._clean_df(df)
+                if not cleaned.empty:
+                    return cleaned
             except Exception as e:
                 print(f"Fetch intraday error for {sym} ({interval}): {e}")
         return pd.DataFrame()
 
-    # ---------- Feature Extraction (body_ratio, shadow, atr 반영) ----------
+    # ---------- Feature Extraction (ZeroDivision 안전장치 적용) ----------
     @staticmethod
     def extract_features(df: pd.DataFrame) -> pd.DataFrame:
         data = df.copy()
@@ -59,13 +71,17 @@ class MultiTimeframePatternEngine:
             data[f"ma{n}"] = close.rolling(n).mean()
             data[f"ma{n}_ratio"] = close / data[f"ma{n}"] - 1.0
 
-        rng = (high - low).replace(0, np.nan)
+        # ZeroDivision 방지 (0일 경우 0.0001 대입)
+        rng = (high - low).replace(0, np.nan).fillna(0.0001)
+        
         data["body_ratio"] = (close - op) / rng
         data["upper_shadow_ratio"] = (high - np.maximum(op, close)) / rng
         data["lower_shadow_ratio"] = (np.minimum(op, close) - low) / rng
         data["close_location"] = (close - low) / rng
         data["gap_ratio"] = op / close.shift(1) - 1.0
-        data["vol_ratio"] = vol / vol.rolling(20).mean() - 1.0
+        
+        vol_ma20 = vol.rolling(20).mean().replace(0, np.nan).fillna(1.0)
+        data["vol_ratio"] = vol / vol_ma20 - 1.0
 
         tr = pd.concat([
             high - low,
@@ -75,12 +91,16 @@ class MultiTimeframePatternEngine:
         data["atr_ratio"] = tr.rolling(14).mean() / close
 
         data["close_pct"] = close.pct_change()
-        data["position20"] = (close - close.rolling(20).min()) / (close.rolling(20).max() - close.rolling(20).min()).replace(0, np.nan)
-        data["position60"] = (close - close.rolling(60).min()) / (close.rolling(60).max() - close.rolling(60).min()).replace(0, np.nan)
+        
+        p20_diff = (close.rolling(20).max() - close.rolling(20).min()).replace(0, np.nan).fillna(1.0)
+        p60_diff = (close.rolling(60).max() - close.rolling(60).min()).replace(0, np.nan).fillna(1.0)
+        
+        data["position20"] = (close - close.rolling(20).min()) / p20_diff
+        data["position60"] = (close - close.rolling(60).min()) / p60_diff
         
         return data.replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
-    # ---------- Similarity Calculations (ATR 및 Candle 구조 적용) ----------
+    # ---------- Similarity Calculations ----------
     @staticmethod
     def _cos(a: np.ndarray, b: np.ndarray) -> float:
         if len(a) != len(b): return 0.0
@@ -133,7 +153,7 @@ class MultiTimeframePatternEngine:
         idx = np.argsort(scores_np)[::-1][: min(self.top_k, len(scores_np))]
         return futures_np[idx], scores_np[idx].tolist()
 
-    # ---------- 타임프레임별 독립 상태 보존 분석 ----------
+    # ---------- 타임프레임별 분석 ----------
     @staticmethod
     def timeframe_summary(df: pd.DataFrame, label: str) -> Dict[str, Any]:
         if df.empty or len(df) < 2:
@@ -166,13 +186,12 @@ class MultiTimeframePatternEngine:
             "atrRatio": round(float(last.atr_ratio) * 100, 2),
         }
 
-    # ---------- 종가 구조 분석 모듈 (Close Structure Score) ----------
+    # ---------- 종가 구조 분석 ----------
     def close_structure(self, daily: pd.DataFrame) -> Dict[str, Any]:
         if daily.empty: return {}
         f = self.extract_features(daily)
         x = f.iloc[-1]
         
-        # 종가 강도 점수 산출
         strength_score = np.clip(
             50 + (x.close_location - 0.5) * 40 + x.body_ratio * 20 + min(max(x.vol_ratio, -1), 1) * 10,
             0, 100
@@ -188,18 +207,17 @@ class MultiTimeframePatternEngine:
             "position60": round(float(x.position60) * 100, 1),
         }
 
-    # ---------- 동적 시나리오 판별 & 유사도 가중치 확률 ----------
+    # ---------- 동적 시나리오 판별 (최소 샘플 조건 및 안전장치 강화) ----------
     def scenarios(self, future_matrix: np.ndarray, similarity_scores: List[float]) -> Dict[str, Any]:
         n_samples = len(future_matrix)
         if n_samples < 3:
             return {"matchedCount": n_samples, "confidence": 0.0, "scenarios": [], "error": "유사 패턴 부족"}
 
         k = min(3, n_samples)
-        model = KMeans(n_clusters=k, random_state=42, n_init=20)
+        model = KMeans(n_clusters=k, random_state=42, n_init=10)
         labels = model.fit_predict(future_matrix)
         centers = model.cluster_centers_
 
-        # 1) 유사도 가중 확률 산출
         scores = np.asarray(similarity_scores, dtype=float)
         weights = np.clip(scores, 0.0, 1.0) + 1e-6
         weighted_counts = np.array([weights[labels == i].sum() for i in range(k)])
@@ -211,7 +229,6 @@ class MultiTimeframePatternEngine:
             final_return = float(path[-1])
             max_drawdown = float(np.min(centers[i]))
 
-            # 2) 물리적 경로 형태 분석을 통한 동적 이름 정의
             if final_return < -0.01:
                 name = "하락 전환"
             elif final_return > 0.01 and max_drawdown < -0.015:
@@ -229,12 +246,10 @@ class MultiTimeframePatternEngine:
                 "sampleCount": int(np.sum(labels == i))
             })
 
-        # 확률 높은 순 정렬
         scenarios = sorted(scenarios, key=lambda x: x["probability"], reverse=True)
         for idx, sc in enumerate(scenarios):
             sc["rank"] = idx + 1
 
-        # 별도의 예측 신뢰도 (Confidence Score) 계산
         sample_score = min(1.0, n_samples / 50.0) * 30
         avg_sim = np.mean(scores) * 40
         confidence = round(sample_score + avg_sim + (scenarios[0]["probability"] * 0.3), 1)
