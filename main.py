@@ -1,3 +1,4 @@
+import os
 import urllib.parse
 import requests
 from fastapi import FastAPI, Query, HTTPException
@@ -19,12 +20,10 @@ app.add_middleware(
 HEADERS = {"User-Agent": "Mozilla/5.0", "Referer": "https://m.stock.naver.com/"}
 engine = MultiTimeframePatternEngine(forecast_horizon=5, top_k=50)
 
-# 미국 티커 앞의 'A' prefix 처리 및 규격화
 def normalize_code(code: str, is_us: bool) -> str:
     val = code.strip().upper()
     if not is_us and val.startswith("A") and len(val) == 7 and val[1:].isdigit():
         val = val[1:]
-    val = val.replace(".KS", "").replace(".KQ", "")
     return val
 
 def search_naver(q: str):
@@ -69,13 +68,25 @@ def analyze_stock(
     clean = normalize_code(code, is_us)
     
     try:
+        # 1차 데이터 수집 시도
         daily = engine.fetch_daily(clean, is_us, "5y")
         
-        # 1. 주가 데이터 로드 실패 시 503 대신 404와 명확한 JSON 에러 전달
+        # 한국 주식 데이터 수신 실패 시 심볼(.KS / .KQ) 보완 후 재시도
+        if (daily is None or daily.empty) and not is_us and not clean.endswith((".KS", ".KQ")):
+            for suffix in [".KS", ".KQ"]:
+                try_code = f"{clean}{suffix}"
+                daily_try = engine.fetch_daily(try_code, is_us, "5y")
+                if daily_try is not None and not daily_try.empty:
+                    daily = daily_try
+                    clean = try_code
+                    break
+
+        # 최종 데이터 조회 실패 시 예외 처리
         if daily is None or daily.empty:
+            print(f"[DATA_ERROR] Ticker '{clean}' data fetch failed. (is_us={is_us})")
             return JSONResponse(
                 status_code=404, 
-                content={"error": f"'{clean}' 종목의 주가 데이터를 불러올 수 없습니다. 종목 코드를 확인해 주세요."}
+                content={"error": f"'{clean}' 종목 주가 데이터를 찾을 수 없습니다. 코드를 확인해 주세요."}
             )
 
         monthly = engine.fetch_monthly(clean, is_us, "10y")
@@ -84,7 +95,6 @@ def analyze_stock(
 
         result = engine.analyze(daily, monthly, h60, m15)
         
-        # 2. 프론트엔드가 요구하는 JSON 규격으로 안전하게 반환
         return {
             "ticker": clean,
             "is_us": is_us,
@@ -93,16 +103,13 @@ def analyze_stock(
         }
         
     except Exception as e:
-        print(f"Analyze Engine Exception: {e}")
-        # 엔진 내부 연산 에러 시 서버가 죽지 않고 메시지를 안전하게 전달
+        print(f"[ENGINE_ERROR] {e}")
         return JSONResponse(
             status_code=500, 
-            content={"error": f"분석 연산 중 오류가 발생했습니다: {str(e)}"}
+            content={"error": f"AI 분석 연산 중 오류가 발생했습니다: {str(e)}"}
         )
 
 if __name__ == "__main__":
     import uvicorn
-    # Render 호스팅 배포 환경 대응 (PORT 환경변수 지원)
-    import os
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
