@@ -1,6 +1,8 @@
 import numpy as np
 import pandas as pd
 import yfinance as yf
+import requests
+import json
 from typing import Dict, Any, List, Tuple
 from sklearn.cluster import KMeans
 
@@ -10,33 +12,95 @@ class MultiTimeframePatternEngine:
         self.top_k = top_k
         self.windows = [5, 10, 20, 60]
         self.window_weights = {5: 0.30, 10: 0.25, 20: 0.25, 60: 0.20}
+        self.headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://finance.naver.com/"
+        }
 
-    # yfinance MultiIndex 컬럼 정형화 헬퍼
+    # Data Clean Helper
     @staticmethod
     def _clean_df(df: pd.DataFrame) -> pd.DataFrame:
         if df.empty:
             return pd.DataFrame()
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
-        return df[["Open", "High", "Low", "Close", "Volume"]].dropna()
+        
+        target_cols = ["Open", "High", "Low", "Close", "Volume"]
+        for col in target_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        
+        return df[target_cols].dropna()
+
+    # 네이버 차트 API 우회 크롤러 (한국 주식 전용)
+    def _fetch_naver_chart(self, code: str, timeframe: str = "day", count: int = 1250) -> pd.DataFrame:
+        clean_code = code.strip().upper().replace(".KS", "").replace(".KQ", "")
+        if clean_code.startswith("A") and len(clean_code) == 7 and clean_code[1:].isdigit():
+            clean_code = clean_code[1:]
+
+        url = f"https://fchart.stock.naver.com/sise.nhn?symbol={clean_code}&timeframe={timeframe}&count={count}&requestType=0"
+        
+        try:
+            res = requests.get(url, headers=self.headers, timeout=5)
+            if res.status_code == 200:
+                import xml.etree.ElementTree as ET
+                root = ET.fromstring(res.text)
+                items = root.findall(".//item")
+                
+                records = []
+                for item in items:
+                    data = item.get("data", "").split("|")
+                    if len(data) >= 6:
+                        records.append({
+                            "Date": data[0],
+                            "Open": float(data[1]),
+                            "High": float(data[2]),
+                            "Low": float(data[3]),
+                            "Close": float(data[4]),
+                            "Volume": float(data[5]),
+                        })
+                
+                if records:
+                    df = pd.DataFrame(records)
+                    df.set_index("Date", inplace=True)
+                    return self._clean_df(df)
+        except Exception as e:
+            print(f"[Naver Fetch Error] Ticker {clean_code} ({timeframe}): {e}")
+        
+        return pd.DataFrame()
 
     # ---------- Data Fetching ----------
     def fetch_daily(self, code: str, is_us: bool, period: str = "5y") -> pd.DataFrame:
         symbol = code.upper().strip()
-        candidates = [symbol] if is_us else [f"{code}.KS", f"{code}.KQ"]
+        
+        # 한국 주식인 경우 네이버 파이낸스 차트 API 우선 수집 (yfinance IP 차단회피)
+        if not is_us:
+            df_naver = self._fetch_naver_chart(symbol, timeframe="day", count=1250)
+            if not df_naver.empty and len(df_naver) >= 60:
+                return df_naver
+
+        # 미국 주식 및 백업용 yfinance
+        candidates = [symbol] if is_us else [f"{symbol}.KS", f"{symbol}.KQ"]
         for sym in candidates:
             try:
                 df = yf.Ticker(sym).history(period=period, auto_adjust=False)
                 cleaned = self._clean_df(df)
-                if not cleaned.empty and len(cleaned) >= 120:
+                if not cleaned.empty and len(cleaned) >= 60:
                     return cleaned
             except Exception as e:
-                print(f"Fetch daily error for {sym}: {e}")
+                print(f"Fetch daily yfinance error for {sym}: {e}")
+                
         return pd.DataFrame()
 
     def fetch_monthly(self, code: str, is_us: bool, period: str = "10y") -> pd.DataFrame:
         symbol = code.upper().strip()
-        candidates = [symbol] if is_us else [f"{code}.KS", f"{code}.KQ"]
+        
+        if not is_us:
+            df_naver = self._fetch_naver_chart(symbol, timeframe="month", count=120)
+            if not df_naver.empty:
+                return df_naver
+
+        candidates = [symbol] if is_us else [f"{symbol}.KS", f"{symbol}.KQ"]
         for sym in candidates:
             try:
                 df = yf.Ticker(sym).history(period=period, interval="1mo", auto_adjust=False)
@@ -50,7 +114,15 @@ class MultiTimeframePatternEngine:
     def fetch_intraday(self, code: str, is_us: bool, interval: str = "60m") -> pd.DataFrame:
         period = "60d" if interval == "60m" else "30d"
         symbol = code.upper().strip()
-        candidates = [symbol] if is_us else [f"{code}.KS", f"{code}.KQ"]
+        
+        # 한국 주식 분봉 처리
+        if not is_us:
+            tf = "60" if interval == "60m" else "15"
+            df_naver = self._fetch_naver_chart(symbol, timeframe=tf, count=300)
+            if not df_naver.empty:
+                return df_naver
+
+        candidates = [symbol] if is_us else [f"{symbol}.KS", f"{symbol}.KQ"]
         for sym in candidates:
             try:
                 df = yf.Ticker(sym).history(period=period, interval=interval, auto_adjust=False)
@@ -61,7 +133,7 @@ class MultiTimeframePatternEngine:
                 print(f"Fetch intraday error for {sym} ({interval}): {e}")
         return pd.DataFrame()
 
-    # ---------- Feature Extraction (ZeroDivision 안전장치 적용) ----------
+    # ---------- Feature Extraction ----------
     @staticmethod
     def extract_features(df: pd.DataFrame) -> pd.DataFrame:
         data = df.copy()
@@ -71,7 +143,6 @@ class MultiTimeframePatternEngine:
             data[f"ma{n}"] = close.rolling(n).mean()
             data[f"ma{n}_ratio"] = close / data[f"ma{n}"] - 1.0
 
-        # ZeroDivision 방지 (0일 경우 0.0001 대입)
         rng = (high - low).replace(0, np.nan).fillna(0.0001)
         
         data["body_ratio"] = (close - op) / rng
@@ -137,7 +208,7 @@ class MultiTimeframePatternEngine:
         prices = df["Close"].values.astype(float)
         n = len(df)
         max_w = max(self.windows)
-        if n < max_w + self.forecast_horizon + 60:
+        if n < max_w + self.forecast_horizon + 10:
             return np.empty((0, self.forecast_horizon)), []
 
         futures, scores = [], []
@@ -150,6 +221,9 @@ class MultiTimeframePatternEngine:
 
         scores_np = np.asarray(scores)
         futures_np = np.asarray(futures)
+        if len(scores_np) == 0:
+            return np.empty((0, self.forecast_horizon)), []
+
         idx = np.argsort(scores_np)[::-1][: min(self.top_k, len(scores_np))]
         return futures_np[idx], scores_np[idx].tolist()
 
@@ -207,7 +281,7 @@ class MultiTimeframePatternEngine:
             "position60": round(float(x.position60) * 100, 1),
         }
 
-    # ---------- 동적 시나리오 판별 (최소 샘플 조건 및 안전장치 강화) ----------
+    # ---------- 동적 시나리오 판별 ----------
     def scenarios(self, future_matrix: np.ndarray, similarity_scores: List[float]) -> Dict[str, Any]:
         n_samples = len(future_matrix)
         if n_samples < 3:
