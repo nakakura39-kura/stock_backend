@@ -46,16 +46,6 @@ def normalize_code(code: str, is_us: bool) -> str:
 
 
 def search_naver(q: str):
-    """
-    종목 검색
-
-    한국:
-        삼성전자 → 005930 / False
-
-    미국:
-        AAPL → AAPL / True
-    """
-
     q = q.strip()
 
     if not q:
@@ -78,158 +68,77 @@ def search_naver(q: str):
             timeout=5
         )
 
-        print(f"[SEARCH] query={q}")
-        print(f"[SEARCH] status={res.status_code}")
-
         if res.ok:
-
-            # ★ 실제 Naver 응답 확인용
-            print(f"[NAVER_RAW] {res.text[:3000]}")
-
             data = res.json()
             items = data.get("items", [])
 
-            print(f"[NAVER_ITEMS] {items}")
-
             if items:
-
                 first = items[0]
 
-                print(f"[NAVER_FIRST] {first}")
+                code = str(
+                    first.get("code")
+                    or first.get("reutersCode")
+                    or ""
+                ).strip().upper()
 
-                # -----------------------------------
-                # 배열 형태
-                # -----------------------------------
-                if isinstance(first, list):
+                name = str(
+                    first.get("name")
+                    or q
+                ).strip()
 
-                    values = [
-                        str(x).strip()
-                        for x in first
-                    ]
+                nation_code = str(
+                    first.get("nationCode")
+                    or ""
+                ).upper()
 
-                    print(f"[NAVER_VALUES] {values}")
+                type_code = str(
+                    first.get("typeCode")
+                    or ""
+                ).upper()
 
-                    # 6자리 숫자 코드 찾기
-                    stock_code = next(
-                        (
-                            x for x in values
-                            if len(x) == 6
-                            and x.isdigit()
-                        ),
-                        None
-                    )
+                # Naver 국내주식
+                if nation_code == "KOR" or type_code in {
+                    "KOSPI",
+                    "KOSDAQ",
+                    "KONEX"
+                }:
+                    return {
+                        "code": code,
+                        "name": name,
+                        "is_us": False
+                    }
 
-                    if stock_code:
-
-                        stock_name = next(
-                            (
-                                x for x in values
-                                if x == q
-                            ),
-                            q
-                        )
-
-                        print(
-                            f"[SEARCH_RESULT] "
-                            f"KR {stock_name} -> {stock_code}"
-                        )
-
-                        return {
-                            "code": stock_code,
-                            "name": stock_name,
-                            "is_us": False
-                        }
-
-                # -----------------------------------
-                # 객체 형태
-                # -----------------------------------
-                elif isinstance(first, dict):
-
-                    code = (
-                        first.get("code")
-                        or first.get("symbol")
-                        or first.get("ticker")
-                    )
-
-                    name = (
-                        first.get("name")
-                        or first.get("stockName")
-                        or first.get("title")
-                        or q
-                    )
-
-                    market = str(
-                        first.get("market")
-                        or first.get("exchange")
-                        or ""
-                    ).upper()
-
-                    if code:
-
-                        code = str(code).strip()
-
-                        # 6자리 숫자는 무조건 한국
-                        if (
-                            len(code) == 6
-                            and code.isdigit()
-                        ):
-                            return {
-                                "code": code,
-                                "name": str(name),
-                                "is_us": False
-                            }
-
-                        is_us = market in {
-                            "NASDAQ",
-                            "NYSE",
-                            "AMEX",
-                            "NYSEARCA",
-                            "ARCA"
-                        }
-
-                        return {
-                            "code": code.upper(),
-                            "name": str(name),
-                            "is_us": is_us
-                        }
+                # 그 외 해외주식
+                return {
+                    "code": code,
+                    "name": name,
+                    "is_us": True
+                }
 
     except Exception as e:
-
         print(
             f"[SEARCH_ERROR] "
             f"{type(e).__name__}: {e}"
         )
 
-    # -----------------------------------
-    # 직접 입력한 한국 종목코드
-    # -----------------------------------
-
+    # 숫자 6자리 직접 입력
     if len(q) == 6 and q.isdigit():
-
         return {
             "code": q,
             "name": q,
             "is_us": False
         }
 
-    # -----------------------------------
-    # 미국 티커
-    #
+    # 영문 티커만 미국주식으로 판단
     # ★ isascii()가 중요
-    # -----------------------------------
-
     if q.isascii() and q.isalpha():
-
         return {
             "code": q.upper(),
             "name": q.upper(),
             "is_us": True
         }
 
-    # -----------------------------------
     # 최종 fallback
-    # -----------------------------------
-
     return {
         "code": q,
         "name": q,
