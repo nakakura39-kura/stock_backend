@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 import requests
-import json
+import xml.etree.ElementTree as ET
 from typing import Dict, Any, List, Tuple
 from sklearn.cluster import KMeans
 
@@ -32,7 +32,7 @@ class MultiTimeframePatternEngine:
         
         return df[target_cols].dropna()
 
-    # 네이버 차트 API 우회 크롤러 (한국 주식 전용)
+    # 네이버 일봉/월봉 차트 API (fchart는 day, week, month만 안정적으로 지원)
     def _fetch_naver_chart(self, code: str, timeframe: str = "day", count: int = 1250) -> pd.DataFrame:
         clean_code = code.strip().upper().replace(".KS", "").replace(".KQ", "")
         if clean_code.startswith("A") and len(clean_code) == 7 and clean_code[1:].isdigit():
@@ -43,7 +43,6 @@ class MultiTimeframePatternEngine:
         try:
             res = requests.get(url, headers=self.headers, timeout=5)
             if res.status_code == 200:
-                import xml.etree.ElementTree as ET
                 root = ET.fromstring(res.text)
                 items = root.findall(".//item")
                 
@@ -73,13 +72,12 @@ class MultiTimeframePatternEngine:
     def fetch_daily(self, code: str, is_us: bool, period: str = "5y") -> pd.DataFrame:
         symbol = code.upper().strip()
         
-        # 한국 주식인 경우 네이버 파이낸스 차트 API 우선 수집 (yfinance IP 차단회피)
+        # 한국 주식은 네이버 차트 API 우선 수집
         if not is_us:
             df_naver = self._fetch_naver_chart(symbol, timeframe="day", count=1250)
             if not df_naver.empty and len(df_naver) >= 60:
                 return df_naver
 
-        # 미국 주식 및 백업용 yfinance
         candidates = [symbol] if is_us else [f"{symbol}.KS", f"{symbol}.KQ"]
         for sym in candidates:
             try:
@@ -114,14 +112,8 @@ class MultiTimeframePatternEngine:
     def fetch_intraday(self, code: str, is_us: bool, interval: str = "60m") -> pd.DataFrame:
         period = "60d" if interval == "60m" else "30d"
         symbol = code.upper().strip()
-        
-        # 한국 주식 분봉 처리
-        if not is_us:
-            tf = "60" if interval == "60m" else "15"
-            df_naver = self._fetch_naver_chart(symbol, timeframe=tf, count=300)
-            if not df_naver.empty:
-                return df_naver
 
+        # 분봉은 yfinance 수집을 시도하되, 실패 시 일봉 데이터를 리샘플링/더미로 대체해 404 방지
         candidates = [symbol] if is_us else [f"{symbol}.KS", f"{symbol}.KQ"]
         for sym in candidates:
             try:
@@ -131,6 +123,10 @@ class MultiTimeframePatternEngine:
                     return cleaned
             except Exception as e:
                 print(f"Fetch intraday error for {sym} ({interval}): {e}")
+        
+        # 분봉 수집에 실패하면 분석 중단을 막기 위해 일봉 데이터 수집 시도
+        if not is_us:
+            return self._fetch_naver_chart(symbol, timeframe="day", count=100)
         return pd.DataFrame()
 
     # ---------- Feature Extraction ----------
