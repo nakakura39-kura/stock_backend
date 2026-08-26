@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 # 이제 경로에 상관없이 정상적으로 불러옵니다.
-from backend_pipeline import MultiTimeframePatternEngine
+from pipeline import MultiTimeframePatternEngine
 
 app = FastAPI(
     title="Stock AI Multi-Timeframe Chart Analyzer",
