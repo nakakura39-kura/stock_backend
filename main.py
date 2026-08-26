@@ -169,6 +169,13 @@ def analyze_stock(
     is_us: bool = Query(False, alias="is_us")
 ):
 
+    print(
+        f"[ANALYZE_REQUEST] "
+        f"code={repr(code)} "
+        f"is_us={repr(is_us)}",
+        flush=True
+    )
+
     if not code.strip():
         raise HTTPException(
             status_code=400,
@@ -185,6 +192,13 @@ def analyze_stock(
     )
 
     try:
+
+    print(
+    f"[ENGINE_CALL] "
+    f"code={repr(clean)}, "
+    f"is_us={repr(is_us)}",
+    flush=True
+)
 
         daily = engine.fetch_daily(
             clean,
