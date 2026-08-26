@@ -1,8 +1,10 @@
 import os
 import sys
 
-# 현재 main.py가 위치한 디렉터리를 Python 모듈 검색 경로 최우선(0번)에 추가
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# 현재 main.py 파일이 있는 '실제 위치'를 파이썬 모듈 검색 경로 맨 앞에 추가
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
 
 import urllib.parse
 import requests
@@ -10,7 +12,7 @@ from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-# 상대 경로 점(.) 없이 바로 불러옵니다.
+# 이제 경로에 상관없이 정상적으로 불러옵니다.
 from backend_pipeline import MultiTimeframePatternEngine
 
 app = FastAPI(
