@@ -1,20 +1,17 @@
 import os
 import sys
+
+# 현재 main.py가 위치한 디렉터리를 Python 모듈 검색 경로 최우선(0번)에 추가
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import urllib.parse
 import requests
-
-# 실행 디렉토리를 파이썬 모듈 검색 경로에 추가
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-# 상대 경로 import로 수정
-try:
-    from backend_pipeline import MultiTimeframePatternEngine
-except ImportError:
-    from .backend_pipeline import MultiTimeframePatternEngine
+# 상대 경로 점(.) 없이 바로 불러옵니다.
+from backend_pipeline import MultiTimeframePatternEngine
 
 app = FastAPI(
     title="Stock AI Multi-Timeframe Chart Analyzer",
