@@ -184,7 +184,7 @@ def analyze_stock(
 
     clean = normalize_code(code, is_us)
 
-    print(
+     print(
         f"[ANALYZE] "
         f"code={code}, "
         f"clean={clean}, "
@@ -193,12 +193,12 @@ def analyze_stock(
 
     try:
 
-    print(
-    f"[ENGINE_CALL] "
-    f"code={repr(clean)}, "
-    f"is_us={repr(is_us)}",
-    flush=True
-)
+        print(
+        f"[ENGINE_CALL] "
+        f"code={repr(clean)}, "
+        f"is_us={repr(is_us)}",
+        flush=True
+    )
 
         daily = engine.fetch_daily(
             clean,
