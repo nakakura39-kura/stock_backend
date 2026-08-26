@@ -41,7 +41,6 @@ def normalize_code(code: str, is_us: bool) -> str:
         val = val[1:]
 
     val = val.replace(".KS", "").replace(".KQ", "")
-
     return val
 
 
@@ -116,10 +115,7 @@ def search_naver(q: str):
                 }
 
     except Exception as e:
-        print(
-            f"[SEARCH_ERROR] "
-            f"{type(e).__name__}: {e}"
-        )
+        print(f"[SEARCH_ERROR] {type(e).__name__}: {e}")
 
     # 숫자 6자리 직접 입력
     if len(q) == 6 and q.isdigit():
@@ -130,7 +126,6 @@ def search_naver(q: str):
         }
 
     # 영문 티커만 미국주식으로 판단
-    # ★ isascii()가 중요
     if q.isascii() and q.isalpha():
         return {
             "code": q.upper(),
@@ -184,7 +179,7 @@ def analyze_stock(
 
     clean = normalize_code(code, is_us)
 
-     print(
+    print(
         f"[ANALYZE] "
         f"code={code}, "
         f"clean={clean}, "
@@ -192,13 +187,12 @@ def analyze_stock(
     )
 
     try:
-
         print(
-        f"[ENGINE_CALL] "
-        f"code={repr(clean)}, "
-        f"is_us={repr(is_us)}",
-        flush=True
-    )
+            f"[ENGINE_CALL] "
+            f"code={repr(clean)}, "
+            f"is_us={repr(is_us)}",
+            flush=True
+        )
 
         daily = engine.fetch_daily(
             clean,
@@ -207,7 +201,6 @@ def analyze_stock(
         )
 
         if daily is None or daily.empty:
-
             print(
                 f"[DATA_ERROR] "
                 f"Ticker '{clean}' "
@@ -260,7 +253,6 @@ def analyze_stock(
         }
 
     except Exception as e:
-
         print(
             f"[ENGINE_ERROR] "
             f"{type(e).__name__}: {e}"
@@ -276,7 +268,6 @@ def analyze_stock(
 
 
 if __name__ == "__main__":
-
     import uvicorn
 
     port = int(
