@@ -82,7 +82,7 @@ class MultiTimeframePatternEngine:
         if df_1m.empty:
             return pd.DataFrame()
 
-        rule = f"{timeframe_minutes}T" if timeframe_minutes < 60 else "1H"
+        rule = f"{timeframe_minutes}T" if timeframe_minutes < 60 else "1h"
         resampled = df_1m.resample(rule).agg({
             "Open": "first",
             "High": "max",
@@ -155,7 +155,7 @@ class MultiTimeframePatternEngine:
             except Exception as e:
                 print(f"Fetch intraday error for {sym} ({interval}): {e}")
         
-        # 3. 데이터가 없을 경우 가짜 데이터(일봉)를 채우지 않고 정직하게 빈 값 반환
+        # 3. 데이터가 없을 경우 가짜 데이터(일봉)를 채우지 않고 빈 값 반환
         return pd.DataFrame()
 
     # ---------- Feature Extraction ----------
@@ -321,7 +321,9 @@ class MultiTimeframePatternEngine:
         scores = np.asarray(similarity_scores, dtype=float)
         weights = np.clip(scores, 0.0, 1.0) + 1e-6
         weighted_counts = np.array([weights[labels == i].sum() for i in range(k)])
-        probs = (weighted_counts / weighted_counts.sum()) * 100
+        
+        total_weight = weighted_counts.sum()
+        probs = (weighted_counts / total_weight * 100) if total_weight > 0 else np.zeros(k)
 
         scenarios = []
         for i in range(k):
@@ -329,7 +331,7 @@ class MultiTimeframePatternEngine:
             final_return = float(path[-1])
             max_drawdown = float(np.min(centers[i]))
 
-            # 시나리오 이름 세분화 로직
+            # 시나리오 이름 세분화 로직 (0 나눗셈 없는 안전한 조건식)
             if final_return > 0.05:
                 name = "강한 상승 지속"
             elif final_return > 0.01 and max_drawdown < -0.015:
