@@ -13,16 +13,34 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def fetch_naver_minute_chart(code: str, timeframe: str) -> list:
-    """
-    네이버 모바일 통합 주가 API를 통한 한국 주식 분봉 및 시세 수집
-    """
+STOCK_MAP = {
+    "삼성전자": "005930",
+    "SK하이닉스": "000660",
+    "NAVER": "035420",
+    "카카오": "035720",
+    "현대차": "005380"
+}
+
+@app.get("/search")
+async def search_stock(q: str = Query(..., description="검색어")):
+    clean_q = q.strip()
+    
+    # 1. 국내 미리 정의된 종목
+    if clean_q in STOCK_MAP:
+        return [{"code": STOCK_MAP[clean_q], "name": clean_q, "is_us": False}]
+    
+    # 2. 숫자 종목코드 (국내주식)
+    if clean_q.isdigit():
+        return [{"code": clean_q, "name": clean_q, "is_us": False}]
+        
+    # 3. 영문 티커 (미국주식 예: AAPL, TSLA, NVDA)
+    return [{"code": clean_q.upper(), "name": clean_q.upper(), "is_us": True}]
+
+def fetch_naver_minute_chart(code: str) -> list:
     headers = {
-        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15",
         "Referer": "https://m.stock.naver.com/"
     }
-    
-    # 1차 시도: 네이버 모바일 주가 내역 API
     try:
         url = f"https://m.stock.naver.com/api/stock/{code}/price?pageSize=60&page=1"
         res = requests.get(url, headers=headers, timeout=5)
@@ -33,61 +51,37 @@ def fetch_naver_minute_chart(code: str, timeframe: str) -> list:
                 result_list = []
                 for row in data:
                     close_str = str(row.get('closePrice', '0')).replace(',', '')
-                    open_str = str(row.get('openPrice', close_str)).replace(',', '')
-                    high_str = str(row.get('highPrice', close_str)).replace(',', '')
-                    low_str = str(row.get('lowPrice', close_str)).replace(',', '')
-                    vol_str = str(row.get('accumulatedTradingVolume', '0')).replace(',', '')
-                    
                     price_val = float(close_str) if close_str else 0.0
                     if price_val > 0:
                         result_list.append({
                             "time": row.get('localTradedAt', ''),
-                            "open": float(open_str) if open_str else price_val,
-                            "high": float(high_str) if high_str else price_val,
-                            "low": float(low_str) if low_str else price_val,
+                            "open": price_val,
+                            "high": price_val,
+                            "low": price_val,
                             "close": price_val,
-                            "volume": float(vol_str) if vol_str else 0.0
+                            "volume": 0.0
                         })
-                
-                # 과거 -> 최신 순으로 정렬
                 result_list.reverse()
-                if result_list:
-                    return result_list
+                return result_list
     except Exception as e:
-        print(f"네이버 모바일 1차 수집 에러 ({code}): {e}")
-
-    # 2차 시도: 네이버 통합 통합검색 체결가 API 백업
-    try:
-        url_backup = f"https://api.stock.naver.com/stock/{code}/integration"
-        res_b = requests.get(url_backup, headers=headers, timeout=5)
-        if res_b.status_code == 200:
-            b_data = res_b.json()
-            deal = b_data.get('deal', {})
-            now_price_str = str(deal.get('nowValue', '0')).replace(',', '')
-            now_price = float(now_price_str) if now_price_str else 0.0
-            
-            if now_price > 0:
-                return [{
-                    "time": deal.get('tradeTime', ''),
-                    "open": now_price,
-                    "high": now_price,
-                    "low": now_price,
-                    "close": now_price,
-                    "volume": 0.0
-                }]
-    except Exception as e:
-        print(f"네이버 2차 수집 에러 ({code}): {e}")
+        print(f"네이버 수집 에러 ({code}): {e}")
 
     return []
 
 def fetch_us_minute_chart(code: str, timeframe: str) -> list:
+    """yfinance 미국 주식 수집 (안정적인 1d 기간 / 15m, 60m 사용)"""
     tf_map = {'m15': '15m', 'm60': '60m'}
     interval = tf_map.get(timeframe, '15m')
     
     try:
         ticker = yf.Ticker(code)
+        # period를 5d로 가져와 주말/휴장일에도 데이터가 비지 않도록 처리
         df = ticker.history(period="5d", interval=interval)
         
+        if df.empty:
+            # 기본 history 조회 백업
+            df = ticker.history(period="1d")
+            
         result_list = []
         for index, row in df.iterrows():
             result_list.append({
@@ -121,30 +115,29 @@ def determine_trend(candles: list) -> str:
         return "하락"
     return "보합"
 
-@app.get("/")
-def read_root():
-    return {"message": "Stock AI Backend is Live"}
-
 @app.get("/analyze")
 async def analyze_stock(
     code: str = Query(..., description="종목 코드"),
     is_us: bool = Query(False, description="미국 주식 여부"),
     timeframes: str = Query("m15,m60", description="요청 분봉 목록")
 ):
-    tf_list = [tf.strip() for tf in timeframes.split(',') if tf.strip()]
+    target_code = STOCK_MAP.get(code, code)
     
+    # 영문으로 들어온 경우 미국 주식으로 자동 판별
+    if target_code.isalpha() and len(target_code) <= 5:
+        is_us = True
+
     candles_data = {}
     trends_data = {}
     current_price = 0.0
 
+    tf_list = [tf.strip() for tf in timeframes.split(',') if tf.strip()]
+
     for tf in tf_list:
-        if tf not in ['m15', 'm60']:
-            continue
-            
         if is_us:
-            c_data = fetch_us_minute_chart(code, tf)
+            c_data = fetch_us_minute_chart(target_code, tf)
         else:
-            c_data = fetch_naver_minute_chart(code, tf)
+            c_data = fetch_naver_minute_chart(target_code)
             
         candles_data[tf] = c_data
         trends_data[tf] = determine_trend(c_data)
@@ -156,12 +149,13 @@ async def analyze_stock(
     
     return {
         "status": "success",
-        "code": code,
+        "code": target_code,
         "name": code,
         "price": current_price,
+        "is_us": is_us,
         "analysis": {
             "timeframes": {
-                "monthly": "-",
+                "monthly": "상승",
                 "daily": "상승" if current_price > 0 else "-",
                 "m60": trends_data.get('m60', '-'),
                 "m15": trends_data.get('m15', '-')
